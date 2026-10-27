@@ -4,7 +4,14 @@
 
 **Created**: 2026-07-26
 
-**Status**: Draft
+**Status**: Implemented (Windows)
+
+Tracking reconciled 2026-10-27: all tasks in [tasks.md](tasks.md) are complete.
+Host-specific privilege, UAC, contained execution, and cleanup evidence is in
+[the quickstart record](../../docs/findings/2026-07-26-spec-008-quickstart-verification.md)
+and [Spec 009's live image record](../../docs/findings/2026-07-27-windows-image-provisioning.md).
+The records' stated limitations still apply; this status change is not a new
+privileged-host or independent UAC verification run.
 
 **Input**: User description: "A privileged helper that actually performs privileged operations, so that isolation MALT cannot establish unprivileged is either genuinely established or honestly refused."
 

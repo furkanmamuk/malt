@@ -17,7 +17,7 @@ confirmation.
 
 | Brief | Severity | Verified | One line |
 |---|---|---|---|
-| [001 — hard invariant violations](001-hard-invariant-violations.md) | High | 2026-07-26 | 39 non-test `unwrap`/`expect` and 6 files calling OS APIs outside `malt-platform`, while AGENTS.md marks both invariants clean |
+| [001 — hard invariant violations](001-hard-invariant-violations.md) | High | 2026-07-28 | **RESOLVED** — all seven resolution tasks completed in `9b3e327`; original counts remain historical evidence. |
 | [002 — `kill` does not kill](002-process-kill-does-not-kill.md) | High | 2026-07-28 | **RESOLVED** — `kill` now sends bounded `TERM`, escalates to tree termination, reaps, and only then removes bookkeeping; session destruction retains retryable state on failure. |
 | [003 — rate limiter has no window](003-rate-limiter-has-no-window.md) | High | 2026-07-26 | A "per window" limiter with no window: a client is banned permanently after N requests |
 | [004 — writer lacks the reader's frame bound](004-frame-writer-size-bound.md) | Medium | 2026-07-28 | **RESOLVED** — `framing.rs:203` now bounds `payload_len` against `PROTOCOL_MAX_FRAME_SIZE` before the cast, so neither the emitted-then-rejected nor the wrapping-length case can occur. Verified while scoping spec 010 |
@@ -28,11 +28,11 @@ confirmation.
 ## Not written up, and why
 
 - **A-02 (isolation)** — being delivered now as `specs/007-fail-closed-isolation/`.
-- **Helper-owned privileged-operation entitlement** — discovered while
-  implementing `specs/008-privileged-helper/`. The service boundary is live,
-  but a helper-verifiable session owner/PID/storage-root authority is a
-  security architecture decision, not a bounded brief. It remains explicitly
-  fail-closed and is recorded in `docs/BACKLOG.md`.
+- **Helper-owned privileged-operation entitlement** — delivered by
+  `specs/008-privileged-helper/`, with helper-owned image provisioning in
+  Spec 009. The original security decision is retained in
+  `docs/adr/ADR-0006-helper-session-entitlement-authority.md`; this is no
+  longer a missing prerequisite.
 - **A-08 (pre-handshake exhaustion)** — already closed by spec 005; the
   backlog says so. Listed here because a stale reading of the backlog
   headings suggested otherwise.

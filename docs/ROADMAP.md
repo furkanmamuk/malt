@@ -113,8 +113,11 @@ Mostly superseded. What ADR-0005 leaves open:
   The child now gets the slave with `setsid`/`TIOCSCTTY`; compat panes deliver
   output on Linux for the first time. A macOS-only delivery gap remains,
   deferred by ADR-0006.
-- Contained-tier completion: helper-owned HCS spawning plus a validated image
-  layer configuration for session compute systems.
+- **Windows contained-tier substrate delivered by Specs 008/009:** enrolled
+  helper-owned HCS spawning and validated image layers have live execution and
+  teardown evidence in `docs/findings/2026-07-27-windows-image-provisioning.md`.
+  Remaining Spec 007 work includes adjacent-tier behavioral comparisons and
+  containment-loss reporting; do not rebuild the helper/image substrate.
 
 ## Layout (F)
 
