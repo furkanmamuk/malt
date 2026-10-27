@@ -1212,7 +1212,7 @@ impl<'a> Iterator for Lexer<'a> {
                         .all(|hd| !hd.delimiter.is_empty());
                     if ready && !self.pending_heredocs.is_empty() {
                         let heredocs: Vec<PendingHeredoc> =
-                            self.pending_heredocs.drain(..).collect();
+                            std::mem::take(&mut self.pending_heredocs);
                         let mut bodies = Vec::new();
                         for hd in heredocs {
                             match self.read_heredoc_body(&hd.delimiter, hd.strip_tabs) {

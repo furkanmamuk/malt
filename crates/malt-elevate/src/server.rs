@@ -122,11 +122,21 @@ fn join_all_clients(threads: Vec<std::thread::JoinHandle<()>>) {
 }
 
 fn try_acquire_client_slot(active_clients: &AtomicUsize) -> bool {
-    active_clients
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-            (active < MAX_CONCURRENT_CLIENTS).then_some(active + 1)
-        })
-        .is_ok()
+    let mut active = active_clients.load(Ordering::Acquire);
+    loop {
+        if active >= MAX_CONCURRENT_CLIENTS {
+            return false;
+        }
+        match active_clients.compare_exchange_weak(
+            active,
+            active + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(observed) => active = observed,
+        }
+    }
 }
 
 struct ClientSlot {
