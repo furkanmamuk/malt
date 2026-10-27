@@ -344,6 +344,145 @@ fn restricted_teardown_kills_work_that_bare_teardown_leaves_running() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn capped_cpu_policy_is_read_back_from_the_real_scheduler() {
+    use malt_platform::isolation::job_objects;
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectCpuRateControlInformation, QueryInformationJobObject,
+        JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
+        JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+    };
+    let job =
+        job_objects::create_job_object(&format!("malt-cpu-policy-{}", std::process::id()), 0, 20)
+            .unwrap();
+    let mut info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default();
+    // SAFETY: the owned job and correctly sized writable output record live
+    // throughout the query; no return-length output is needed.
+    assert_ne!(
+        unsafe {
+            QueryInformationJobObject(
+                job.handle() as _,
+                JobObjectCpuRateControlInformation,
+                (&mut info as *mut JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(),
+                std::mem::size_of_val(&info) as u32,
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    assert_eq!(
+        info.ControlFlags,
+        JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP
+    );
+    // SAFETY: the ENABLE/HARD_CAP policy selects this member of the union.
+    assert!(unsafe { info.Anonymous.CpuRate } > 0);
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "subprocess CPU probe invoked by capped_cpu_throttles_real_work"]
+fn isolation_cpu_probe_helper() {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    fn cpu_ticks() -> u64 {
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: the current-process pseudo-handle is valid and each time
+        // output points to a live writable FILETIME record.
+        assert_ne!(
+            unsafe {
+                GetProcessTimes(
+                    GetCurrentProcess(),
+                    &mut created,
+                    &mut exited,
+                    &mut kernel,
+                    &mut user,
+                )
+            },
+            0
+        );
+        let ticks =
+            |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+        ticks(kernel) + ticks(user)
+    }
+    let started = cpu_ticks();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut value = 1u64;
+    while std::time::Instant::now() < deadline {
+        for _ in 0..4096 {
+            value = std::hint::black_box(value.wrapping_mul(1664525).wrapping_add(1013904223));
+        }
+    }
+    let milliseconds = (cpu_ticks() - started) / 10_000;
+    std::fs::write(
+        std::env::var_os("MALT_TEST_CPU_REPORT").unwrap(),
+        milliseconds.to_string(),
+    )
+    .unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn capped_cpu_throttles_real_work() {
+    use malt_platform::isolation::{job_objects, IsolationContext};
+    use malt_platform::process::{spawn_in_isolation, Io, SpawnConfig};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let measure = |rate: u32| {
+        let report = dir.path().join(format!("cpu-{rate}.txt"));
+        let context = IsolationContext::capped();
+        context
+            .establish_job_object(Arc::new(
+                job_objects::create_job_object(
+                    &format!("malt-cpu-probe-{}-{rate}", std::process::id()),
+                    0,
+                    rate,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let config = SpawnConfig::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "isolation_cpu_probe_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("MALT_TEST_CPU_REPORT", report.as_os_str())
+            .stdin(Io::Null)
+            .stdout(Io::Null)
+            .stderr(Io::Null);
+        assert!(spawn_in_isolation(config, &context)
+            .unwrap()
+            .wait()
+            .unwrap()
+            .success());
+        std::fs::read_to_string(report)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    let unrestricted = measure(0);
+    let capped = measure(20);
+    println!(
+        "same 2-second CPU workload: unrestricted={unrestricted}ms CPU, capped={capped}ms CPU"
+    );
+    // A 20%-of-one-core hard cap allows ~400ms CPU in this window. Allow one
+    // scheduling interval of burst/timer granularity, not unlimited use.
+    assert!(capped < 900, "CPU hard cap did not bind: {capped}ms");
+    if unrestricted < 1000 {
+        eprintln!("SKIP adjacent CPU ratio proof: competing host load left only {unrestricted}ms baseline CPU; hard-cap budget assertion and scheduler read-back still ran");
+        return;
+    }
+    assert!(
+        capped * 2 < unrestricted,
+        "same work was not meaningfully throttled"
+    );
+}
+
 #[cfg(not(windows))]
 #[test]
 fn windows_isolation_paths_are_not_claimed_on_other_platforms() {

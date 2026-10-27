@@ -30,6 +30,8 @@ impl JobObject {
 impl Drop for JobObject {
     fn drop(&mut self) {
         if self.handle != 0 {
+            // SAFETY: this object owns the nonzero handle returned by
+            // CreateJobObjectA; Drop is its unique final owner.
             unsafe {
                 let _ = CloseHandle(self.handle);
             }
@@ -148,6 +150,13 @@ pub fn create_job_object(
         )));
     }
 
+    // Own the handle before any fallible configuration so partial setup never
+    // leaves a named kernel object behind.
+    let job = JobObject {
+        handle,
+        name: name.to_string(),
+    };
+
     // Set extended limit information
     let mut limit_flags: u32 = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     let process_memory_limit = if memory_limit_mb > 0 {
@@ -172,13 +181,8 @@ pub fn create_job_object(
     let extended_info = JobObjectExtendedLimitInfo {
         basic_limit_information: JobObjectBasicLimitInformation {
             per_process_user_time_limit: 0,
-            per_job_user_time_limit: if cpu_rate > 0 {
-                // Convert CPU rate to 100-nanosecond units per second
-                // cpu_rate is percentage, so 100% = 10_000_000 (1 second)
-                (cpu_rate as i64) * 100_000
-            } else {
-                0
-            },
+            // A lifetime user-time quota is not a scheduler CPU-rate policy.
+            per_job_user_time_limit: 0,
             limit_flags,
             minimum_working_set_size: 0,
             maximum_working_set_size: if process_memory_limit > 0 {
@@ -221,19 +225,86 @@ pub fn create_job_object(
     };
 
     if result == 0 {
-        // SAFETY: handle is valid (checked above). CloseHandle is safe.
-        unsafe {
-            CloseHandle(handle);
-        }
         return Err(IsolationError::JobObjectError(
             "SetInformationJobObject failed".to_string(),
         ));
     }
 
-    Ok(JobObject {
-        handle,
-        name: name.to_string(),
-    })
+    if cpu_rate > 0 {
+        set_cpu_hard_cap(&job, cpu_rate)?;
+    }
+    Ok(job)
+}
+
+fn set_cpu_hard_cap(job: &JobObject, percent_of_one_core: u32) -> Result<(), IsolationError> {
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectCpuRateControlInformation, QueryInformationJobObject,
+        JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0,
+        JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+    };
+    use windows_sys::Win32::System::Threading::GetActiveProcessorCount;
+    // SAFETY: ALL_PROCESSOR_GROUPS is the documented read-only system query.
+    let processors = unsafe { GetActiveProcessorCount(u16::MAX) };
+    if processors == 0 {
+        return Err(IsolationError::JobObjectError(format!(
+            "GetActiveProcessorCount: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // Win32 specifies a fraction of total system capacity in 1/10000 units;
+    // MALT specifies a percentage of one core (200 = two cores). Round down,
+    // never up to a weaker cap. Requests above host capacity use its natural
+    // 100% ceiling. Sub-resolution caps must be refused rather than weakened.
+    let rate = ((u64::from(percent_of_one_core) * 100) / u64::from(processors)).min(10_000) as u32;
+    if rate == 0 {
+        return Err(IsolationError::JobObjectError(
+            "requested CPU cap is below Windows scheduler resolution".to_string(),
+        ));
+    }
+    let flags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+    let info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
+        ControlFlags: flags,
+        Anonymous: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0 { CpuRate: rate },
+    };
+    // SAFETY: job is owned and info is the SDK's exact rate-information ABI.
+    if unsafe {
+        SetInformationJobObject(
+            job.handle,
+            JobObjectCpuRateControlInformation as u32,
+            (&info as *const JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(),
+            std::mem::size_of_val(&info) as u32,
+        )
+    } == 0
+    {
+        return Err(IsolationError::JobObjectError(format!(
+            "setting CPU hard cap: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let mut observed = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default();
+    // SAFETY: correctly sized output record and live owned job, as above.
+    if unsafe {
+        QueryInformationJobObject(
+            job.handle as _,
+            JobObjectCpuRateControlInformation,
+            (&mut observed as *mut JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(),
+            std::mem::size_of_val(&observed) as u32,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(IsolationError::JobObjectError(format!(
+            "reading CPU hard cap: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: only read CpuRate when the returned flags select hard-cap mode.
+    if observed.ControlFlags != flags || unsafe { observed.Anonymous.CpuRate } != rate {
+        return Err(IsolationError::JobObjectError(
+            "CPU hard-cap read-back differs from the requested policy".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Assign a process to a Job Object by PID.
