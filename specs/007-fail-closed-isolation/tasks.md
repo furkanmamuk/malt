@@ -151,6 +151,7 @@ and still be wired backwards.
   - 2026-10-27 continuation: Bare/Restricted teardown comparison and Restricted/Capped allocation comparison exercise the actual platform launcher. Capped/Contained still needs a fresh real-image comparison; this parent task remains open.
 - [X] T028 [P] [US3] **Prerequisite delivered by Specs 008/009; reconciled 2026-10-27.** The original null-`HCS_OPERATION` crash was fixed in [brief 006](../../docs/briefs/006-hcs-backend-access-violation.md). The subsequent privilege/base-layer blocker was resolved by the enrolled LocalSystem helper and helper-owned Windows image layers. [Live Spec 009 evidence](../../docs/findings/2026-07-27-windows-image-provisioning.md) records required contained session creation, real `cmd /c ver` execution, and compute/workspace/image teardown. This closes the Windows helper/image prerequisite, not the adjacent-tier comparison (T027), containment-loss reporting (T037), or Linux wiring (T032).
 - [ ] T032 [US4] Wire the Linux path in `crates/malt-daemon/src/executor/session_thread.rs` using the existing `namespaces`/`cgroups`/`seccomp`/`rlimit` modules — subject to what T004 found about whether they work. Do not write new backends before confirming the existing ones are absent or broken.
+  - The survey established those limitations; the user approved the owned bootstrap on 2026-10-27 (ADR-0007). T044–T054 below are this task's breakdown, not a replacement feature or a claim that Linux now works.
 - [ ] T033 [US4] **Out of scope while ADR-0006 stands: macOS is unsupported.** Original task retained for traceability: wire the macOS path using the existing `crates/malt-platform/src/isolation/sandbox.rs`. Do not pick this up without the real-host support decision required by [ADR-0006](../../docs/adr/ADR-0006-macos-is-unsupported.md).
 - [X] T034 [US4] `unsupported_platform_required_refuses_and_preferred_reports_bare` covers the no-backend path under `cfg(not(windows))`; Windows uses the explicit contained-unavailable path.
 - [X] T035 [P] [US4] `capabilities_match_the_required_creation_path` proves the reported unavailable Contained tier is refused under Required.
@@ -192,6 +193,35 @@ and still be wired backwards.
 - [X] T041 Recorded the breaking `SessionInfo.isolation` shape and Required-by-default behavior in `docs/RELEASE_NOTES.md`, naming `preferred` and `disabled` as explicit alternatives.
 - [ ] T042 Run the full quickstart manually against a live daemon — all eight scenarios — and record the outcome in a dated `docs/findings/` entry, **including what it does not establish**.
 - [ ] T043 Final verification: `cargo build --workspace`, `cargo test --workspace`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and native Smoosh (the continuation changes `mash`). Run the WSL mirror for platform-path changes. Commit. **Merge to main.**
+
+## T032 breakdown — owned Linux launch boundary (approved 2026-10-27)
+
+**Story: US4 (P3).** Preserve every existing checked task. T032 remains open
+until this breakdown and its live acceptance pass. Tests precede each backend
+claim; a fixture or kernel limitation must be named, never hidden as success.
+
+- [ ] T044 [US4] Define bounded bootstrap messages in `schemas/linux_isolation.vexil`, allocate unused codec IDs in `crates/malt-protocol/src/codec.rs` after registry/design-table inspection, and add round-trip, malformed-frame and identity/state tests in `crates/malt-protocol/tests/codec.rs`; follow `contracts/linux-bootstrap.md`.
+- [ ] T045 [US4] Add real failing Linux lifecycle/first-action/descendant tests in `crates/malt-platform/tests/linux_isolation.rs` with a single-threaded bootstrap test driver (no ordinary threaded Rust test-harness process as bootstrap). Cover namespace identity/proc visibility, no-new-privileges, exec failure and setup rollback; refuse honestly when the host forbids user namespaces.
+- [ ] T046 [US4] Implement the early dispatcher in `crates/malt-bin/src/main.rs` and single-threaded bootstrap/init, rootless mappings, inherited VNP socket, request correlation and exact descriptor transfer in `crates/malt-platform/src/isolation/linux.rs`; payloads must not retain control descriptors or setup capabilities. Prove daemon death and init reaping with real descendants before marking ready.
+- [ ] T047 [US4] Extend the shared carrier in `crates/malt-platform/src/isolation/tier.rs` and broker-owned child lifecycle in `crates/malt-platform/src/process/{mod,unix}.rs`; preserve payload identity, concurrent launch/wait/signal behavior and terminal loss/cleanup ownership without re-deriving backend identity from globals.
+- [ ] T048 [US4] Add optional Linux delegation/rootfs fields to `schemas/config/daemon.vexil` and `crates/malt-config/src/{lib,decode}.rs`; implement delegated cgroup validation, controller activation within the owned subtree, pre-exec enrollment, limit read-back and scoped cleanup in `crates/malt-platform/src/isolation/{linux,cgroups}.rs`. Test real memory/CPU constraints and missing-delegation refusal; never modify a caller's parent cgroup policy or auto-escalate.
+- [ ] T049 [US4] Implement the configured Contained rootfs overlay, private proc/dev/tmp and network boundary in `crates/malt-platform/src/isolation/{linux,overlayfs,network}.rs`; repair/audit `seccomp.rs` using target-ABI syscall constants and prebuilt filters. Test host-file/network denial, required workload operation and failure cleanup. Missing rootfs/kernel support must refuse, never expose host root or report Capped as Contained.
+- [ ] T050 [US4] Wire `apply_session_isolation` in `crates/malt-daemon/src/executor/session_thread.rs` and the common launcher in `crates/mash/src/env.rs` to the owned Linux session. Exercise real commands, pipelines, subprocesses, exact argv/env/cwd and fd behavior; all five executor paths must use the same carrier without fallback.
+- [ ] T051 [US4] Pass a session-owned launcher through `crates/malt-platform/src/pty/spawn.rs`, `crates/malt-daemon/src/supervisor/mod.rs` and `crates/malt-daemon/src/executor/coordinator.rs`; apply the same containment to Compat PTY restore or retain its explicit refusal until the route is actually verified. Prove controlling-tty, IO and child enforcement rather than only successful spawn.
+- [ ] T052 [US4] Make Linux session-tier capability reports in `crates/malt-platform/src/isolation/tier.rs` reflect the actual configured bootstrap/probe path, and verify Required/Preferred plus create/query/list agreement through `crates/malt-daemon/tests/{coordinator,gateway_backend}.rs`. Do not promote macOS facets or a mere binary/kernel-presence check to Verified.
+- [ ] T053 [US4] Exercise broker/control loss, stale/foreign identities, restoration and full descendant/cgroup/mount/workspace cleanup in `crates/malt-platform/tests/linux_isolation.rs` and `crates/malt-daemon/tests/coordinator.rs`; persistence must not convert transient loss into a Bare restoration grant.
+- [ ] T054 [US4] Run Linux live daemon scenarios from `specs/007-fail-closed-isolation/quickstart.md`, full WSL mirror tests, native Windows gates and native Smoosh; record fixture ownership, actual positive proofs, refusals/skips and residual limitations in `docs/findings/` before completing T032. T027/T037/T042/T043 still govern whole-feature closure.
+
+**Dependencies:** T044 → T045 → T046 → T047; T048 follows T046/T047;
+T049 follows T048; T050 follows the established backend; T051 follows T050;
+T052/T053 follow their real launch paths; T054 is last. T044 protocol tests
+and T045 test-driver design are separate-file preparation opportunities, but
+no implementation may claim a tier before its dependencies pass. The existing
+US1 refusal/status behavior remains the MVP while this expansion is built.
+
+## Additional US3 enforcement repair discovered during continuation
+
+- [X] T055 [US3] Replaced the inert user-time field with real scheduler CPU hard-cap setup/read-back in `crates/malt-platform/src/isolation/job_objects.rs`. `crates/malt-platform/tests/isolation_reality.rs` first reproduced absent CPU-control flags, then verified the policy and real throttling of identical child work. Windows full gates passed; see `docs/findings/2026-10-27-windows-cpu-hard-cap.md`.
 
 ---
 

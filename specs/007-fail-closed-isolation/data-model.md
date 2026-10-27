@@ -127,3 +127,29 @@ destroy → containment and everything held inside released (FR-013)
 **Partial establishment is a failure under `Required`**, not a downgrade to
 be reported. Some-constraints-applied is not the tier, and treating it as one
 would reintroduce the defect at finer granularity.
+
+## Linux continuation model (2026-10-27)
+
+`LinuxSessionConfig` is trusted daemon configuration, not untrusted launch
+input: requested tier, CPU/memory policy, optional delegated cgroup root and
+optional Linux rootfs. Paths are validated/canonicalized by the platform;
+payloads cannot choose arbitrary host mounts or migrate outside the owned
+cgroup. Missing required resources refuse the tier. Defaults are 2048 MiB
+and two CPU cores; fixture limits are independently configurable in tests.
+
+`LinuxSession` is an owned platform resource shared through
+`IsolationContext`: broker/init identity, private control endpoint, verified
+namespace identities, optional cgroup, mount/rootfs workspaces, outstanding
+request/process ownership and cleanup state. It is never reconstructed by
+reading mutable environment flags after creation.
+
+`LinuxLaunch` binds request ID and session ID to a payload identity, owned
+stdio/extra descriptors and eventual exit status. Descriptor slots are
+validated against received ancillary handles. A broker PID is not a payload
+PID. Consuming/closing a descriptor happens exactly once even on rejection.
+
+Lifecycle: Preparing → Ready → Closing → Closed; Preparing failure rolls
+back every owned resource. Ready → Lost is terminal for launches and retains
+cleanup identity. EOF, broker identity loss and ambiguous setup/launch
+outcomes cause loss. Restore creates a new verified resource from persisted
+requirements, never reuses old PIDs, descriptors or namespace handles.

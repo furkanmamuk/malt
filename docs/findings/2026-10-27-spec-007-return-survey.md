@@ -106,3 +106,12 @@ That run predates these Spec 007 changes. Its Smoosh job was path-skipped;
 the earlier repair run `40516456513` actually exercised Smoosh because it
 touched MASH. Local continuation Smoosh independently reported 183 passed,
 three unsupported skips, zero harness failures and zero shell failures.
+
+The continuation checkpoint `a56cf2a` subsequently passed its full WSL mirror
+build/tests and [hosted run 40520188462](https://github.com/furkanmamuk/malt/actions/runs/40520188462),
+including actual workflow-dispatch Smoosh. WSL emitted existing cfg/unused
+warnings; this was a build/test pass, not a Linux strict-Clippy claim.
+
+The Linux bootstrap direction was approved after the survey. Its amended
+plan and T044–T054 are design work, not an implemented Linux backend. See
+[ADR-0007](../adr/ADR-0007-linux-session-launch-boundary.md).

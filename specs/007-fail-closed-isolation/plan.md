@@ -4,6 +4,107 @@
 
 **Input**: Feature specification from `/specs/007-fail-closed-isolation/spec.md`
 
+## Accepted continuation — 2026-10-27
+
+The original sections below are the historical plan, not current delivery
+claims. The user approved an owned Linux bootstrap after the
+[return survey](../../docs/findings/2026-10-27-spec-007-return-survey.md)
+disproved the assumption that T032 was only wiring. This amendment supersedes
+the old Linux wiring assumption, the statement that MASH is untouched, and
+any macOS work (unsupported under ADR-0006).
+
+### Owned Linux session bootstrap
+
+No new crate or external runtime dependency. `malt` dispatches a private
+bootstrap entry point **before** CLI clients, async runtimes or daemon
+threads. All OS operations and the bootstrap/reaper implementation live in
+`malt-platform::isolation::linux`; the CLI only calls the platform dispatcher.
+The daemon starts its own executable with one inherited private Unix socket
+endpoint. There is no pathname listener or privileged system service and no
+automatic root escalation. A missing dispatcher is a diagnosed refusal.
+
+The bootstrap is a persistent **session** broker, not a different namespace
+for each command. It creates the user/mount/PID namespace lifecycle, forks
+the PID-namespace init, and remains accountable for that init's lifetime.
+The init stays single-threaded and reaps all descendants; it handles typed
+launch, exit, signal and shutdown requests. Payload children close control
+descriptors and lose setup capabilities before exec. Fork-to-exec code uses
+only precomputed buffers and async-signal-safe OS operations.
+
+The daemon and broker use schema-defined VNP over the inherited socket.
+Handshake and request/reply IDs bind the endpoint to one session and launch
+attempt; malformed, duplicated or out-of-state messages fail closed. File
+descriptors travel as Unix ancillary data tied to typed stream-slot metadata,
+never as integers assumed to have meaning in another process. Payloads may
+not inherit the broker control endpoint. No JSON control side channel.
+The protocol covers the full existing `SpawnConfig` contract: argv0, exact
+environment/cwd, stdio, extra/closed descriptors, process groups and PTY
+controlling-terminal setup. Unsupported combinations are rejected before
+payload execution, not silently ignored.
+
+### Enforcement and acknowledgement
+
+- Restricted: private PID/mount namespaces, appropriately mapped rootless
+  user namespace, private mount propagation and proc view, `no_new_privs`,
+  and removal of setup capabilities from the payload. It is not advertised
+  as a separate filesystem root or resource cap.
+- Capped: all Restricted constraints plus read-back-verified cgroup v2
+  memory and CPU limits, with every payload enrolled before execution.
+  Accept only an explicitly configured delegated subtree; validate ownership,
+  controllers and migration rights. Do not edit the caller's parent hierarchy
+  or turn lack of delegation into root execution. Defaults match the existing
+  policy: 2048 MiB and 200% of one CPU core (two cores); tests use deliberately
+  smaller limits. Linux `cpu.max` expresses this as quota/period, not a
+  cumulative lifetime CPU-time budget.
+- Contained: all Capped constraints plus a private writable overlay over an
+  explicitly configured Linux root filesystem, isolated network, and an
+  architecture-correct seccomp policy. No host root fallback, implicit bind
+  mounts or reuse of the Windows image registry. Linux rootfs/delegation
+  settings belong in the existing daemon configuration schema and decoder;
+  source provisioning/package download is not added by this feature.
+  Missing configuration or kernel support is a discoverable refusal.
+
+The parent retains a setup gate until mapping, mounts, privilege changes,
+resource enrollment and filter setup have succeeded. Setup-ready alone is
+not payload-started: an exec-error channel distinguishes a successful exec
+from a broker that merely accepted a request. Ambiguous replies invalidate
+the shared carrier and block later launches; they never select host spawn.
+Verification compares real child namespace identities/proc views, privilege
+state and cgroup membership/limits rather than trusting requested flags.
+
+`IsolationContext` owns an `Arc`-backed Linux session resource, including its
+broker identity and cleanup resources. `spawn_in_isolation` consumes that
+same carrier on every MASH path. Compat PTY setup must use the same launcher;
+until that route is wired the current explicit refusal remains. `Child`
+supports broker-owned processes without confusing a bootstrap PID with the
+payload PID, or holding a request mutex while blocking all other launches.
+
+Daemon death/control EOF must kill the namespace init and descendants;
+broker death must invalidate the session. Explicit teardown waits for process
+exit, unmounts owned mounts, removes only owned cgroups/workspaces and reports
+cleanup failures. PID reuse is not a valid liveness signal: retain process
+ownership/pidfds or equivalent verified identity. Persist requirements, never
+kernel handles, and re-establish or refuse on restore.
+
+### Amended constitution check
+
+PASS by design: OS calls remain L0; VNP remains the sole component protocol;
+no upward or sibling dependency is added; the broker is dispatched before
+threads; all unsafe paths require safety comments. The scope change was
+surveyed, written down and approved (ADR-0007). Smoosh is now mandatory
+because the common MASH launcher changes. Windows full gates and Linux
+mirror tests are required at implementation checkpoints. No macOS claim.
+
+### Implementation order and acceptance
+
+T044–T054 below T032 in `tasks.md` are its dependency-ordered breakdown.
+Implement the protocol/lifecycle tests first, then Restricted, Capped,
+Contained, common MASH/PTY integration, live capability/status and restoration
+proof. Each admitted tier needs first-action and descendant constraint tests.
+Host limitations skip loudly and also exercise the Required refusal and
+Preferred downgrade; a skipped positive test does not complete that tier's
+acceptance. All original T027/T037/T042/T043 obligations remain.
+
 ## Summary
 
 Requesting containment currently produces a session whether or not the

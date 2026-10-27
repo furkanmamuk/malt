@@ -206,3 +206,43 @@ HCS-aware, a required request is refused and a preferred request is reported
 as a visible downgrade. The capability endpoint reports it unavailable with
 the same reason. AppContainer remains a separately scoped, owned-source
 proposal; it is never a silent fallback.
+
+## R10. Owned Linux bootstrap (accepted 2026-10-27)
+
+**Finding.** The [return survey](../../docs/findings/2026-10-27-spec-007-return-survey.md)
+checked actual production callers and the legacy donor. The existing
+namespace/cgroup modules are not a session launcher; `rlimit` is macOS-only
+and seccomp needs an ABI-correct audit. WSL supports the rootless namespace
+primitive but the normal user has no writable root cgroup delegation.
+
+**Decision.** The user selected an owned bootstrap rather than a util-linux
+runtime dependency. It is a persistent per-session broker/init, with an
+early dispatcher in `malt` and OS code in `malt-platform`. Typed VNP travels
+over an inherited Unix socket; descriptor transfer is ancillary transport,
+not an ad-hoc control protocol. All launch paths consume its shared carrier.
+See [ADR-0007](../../docs/adr/ADR-0007-linux-session-launch-boundary.md) and
+the dated plan amendment. No sibling dependency or automatic root escalation.
+
+**Primary-source constraints.** A new PID namespace needs a newly created
+init process, not just the caller of `unshare`; init death kills the namespace
+and init signal semantics need deliberate handling. See
+[Linux man-pages: PID namespaces](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
+Cgroup controller setup must respect delegation and hierarchical placement,
+not assume that a writable directory alone grants every controller:
+[kernel cgroup v2 documentation](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html).
+Set `no_new_privs` and install an architecture-correct seccomp filter only
+after setup, before payload execution; both persist across permitted exec:
+[kernel no-new-privileges](https://cdn.kernel.org/doc/html/latest/userspace-api/no_new_privs.html),
+[kernel seccomp filter](https://docs.kernel.org/userspace-api/seccomp_filter.html).
+
+**Alternatives rejected.** Calling namespace helpers on the daemon worker
+mutates the wrong process; calling PID `unshare` immediately before exec
+does not create the required init. Undeclared `unshare`/`bwrap` executables
+are not fallback backends. No code is ported verbatim from the donor.
+
+**Configuration decision.** Reuse the daemon configuration for optional
+delegated cgroup and Linux rootfs locations. No package downloader, OCI image
+registry, new tier or general container management API is added. A missing
+rootfs/delegation is an explicit capability limitation and Required refusal.
+Providing such a fixture does not itself verify the constraints: actual
+child/descendant behavior, cleanup and restoration remain required.

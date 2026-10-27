@@ -79,11 +79,11 @@ at the stronger one and not the weaker. For a memory cap, allocate more than
 the cap in each:
 
 ```bash
-malt exec <capped-session-id> 'python3 -c "b = bytearray(600*1024*1024); print(len(b))"'
+malt exec <capped-session-id> 'python3 -c "b = bytearray(3*1024*1024*1024); print(len(b))"'
 ```
 
 ```bash
-malt exec <restricted-session-id> 'python3 -c "b = bytearray(600*1024*1024); print(len(b))"'
+malt exec <restricted-session-id> 'python3 -c "b = bytearray(3*1024*1024*1024); print(len(b))"'
 ```
 
 **Expected**: constrained under the stronger tier, unconstrained under the
@@ -92,6 +92,13 @@ today's behaviour for `capped` versus `contained`.
 
 Repeat for each adjacent pair (SC-004). A pair with no observable difference
 is a tier that does not exist.
+
+The current default cap is 2048 MiB, so the old 600 MiB example could not
+bind. The 3 GiB example requires enough spare host memory for the Restricted
+control. Prefer the automated `capped_memory_limit_binds_where_restricted_does_not`
+probe for a smaller fixture: it compares the same 64 MiB work against a
+16 MiB limit. A subprocess allocation failure is expected only in the capped
+arm; a test-runner crash is never an acceptable result.
 
 ---
 
@@ -163,8 +170,35 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Smoosh is **not** a gate for this feature — `mash` is untouched. Stated so
-its absence is not mistaken for an oversight.
+Smoosh **is** a gate for the continuation: the common MASH launcher changes.
+Build `mash`, set `MASH` to that executable, then run its conformance runner.
+Require 183 passed/three unsupported skips on native Windows; the Linux
+mirror exercises its supported Linux cases separately.
+
+## Linux bootstrap continuation
+
+Implementation is pending; this is the validation contract, not a claim that
+the following tiers already work. Configure only an explicitly delegated
+cgroup subtree and, for Contained, a Linux rootfs through the daemon config
+fields introduced by T048. Rootfs packaging/download is not part of Spec 007.
+Never run the daemon as root just to turn a Required refusal into success.
+
+Run Scenarios 1–8 against the real built Linux `malt` entry point, not a
+threaded test harness standing in for the bootstrap. Also inspect:
+
+- Different child PID/mount namespace identities and proc view, plus
+  `NoNewPrivs: 1`, before executing the payload's first action.
+- Child/descendant cgroup membership and configured memory/CPU limits;
+  compare the same real work under Restricted and Capped.
+- A known host-only file and host network endpoint accessible under Capped
+  but unavailable under configured Contained; inspect its private root mounts.
+- Daemon death, broker death, invalid/partial setup and restore: no escaped
+  payload, stale verified status, owned processes, cgroups, mounts or workspace
+  remain after confirmed teardown.
+
+On a host without delegation/rootfs/kernel support, record the exact refusal
+and visible downgrade. That proves fail-closed behavior, not the missing
+positive containment gate. Do not mark T032 complete on skipped positives.
 
 The gate that replaces it: **isolation tests must call real OS APIs.** 54 of
 the existing isolation tests pass in 0.01 s, which is what pure-logic tests
