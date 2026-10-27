@@ -47,3 +47,8 @@ Clippy passed after the repair. Full workspace tests included native Smoosh;
 the separate launch/loss checkpoint had also explicitly reported 183 passed,
 three unsupported skips, zero harness failures and zero shell failures.
 Fresh privileged image/helper-loss gates remain outstanding for Spec 007.
+
+Code checkpoint `e7c053d` also passed full WSL mirror build/tests and all
+hosted jobs in [run 40521862119](https://github.com/furkanmamuk/malt/actions/runs/40521862119),
+including actual Windows Smoosh. WSL's existing cfg/unused warnings remain;
+this does not claim Linux strict-Clippy or Windows CPU enforcement on Linux.

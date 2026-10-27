@@ -22,3 +22,10 @@ Smoosh job, but strict Windows Clippy then exposed `map_or_identity` in the
 Gateway's saturating session-count conversion. Replaced the identity `map_or`
 with `unwrap_or(u32::MAX)` (a non-panicking fallback, not `unwrap()`). The
 repair remains separate from the resumed Spec 007 enforcement work.
+
+Main `413acb9` passed all hosted jobs in
+[run 40517994364](https://github.com/furkanmamuk/malt/actions/runs/40517994364).
+Its Smoosh job was correctly path-skipped (the commit touched no shell code).
+The later Spec 007 workflow-dispatch runs explicitly exercised Smoosh too.
+Rust 1.99 was installed side-by-side locally for strict gate verification;
+the default toolchain was not changed.

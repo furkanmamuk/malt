@@ -9,6 +9,9 @@ the early `malt` dispatcher with only the intended endpoint inherited. This
 is not a discoverable pathname service and adds no system privilege. Use
 schema-defined, bounded VNP frames; allocate domain/type constants only after
 checking the existing schema and codec registries, and test those mappings.
+The 2026-10-27 inventory found wire domains 0–7 assigned and 8–15 reserved
+(`codec.rs` and the architecture domain table). No new ID is allocated by
+this planning artifact; T044 must update schema, registry and tests together.
 Handshake binds protocol version, nonce and session identity. Payloads must
 not inherit the control descriptor or startup acknowledgement channels.
 
