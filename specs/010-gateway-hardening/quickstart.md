@@ -15,6 +15,32 @@ observable that passes while the defect is fully present.
 
 ## Prerequisites
 
+Windows repeatable CLI proof (isolated store/port; no helper installation):
+
+```powershell
+cargo build -p malt-bin
+pwsh -NoProfile -File scripts/verify-gateway-hardening.ps1
+```
+
+Two-client and aggregate-limit scenarios use the production router's live TCP
+fixture, which mints independent valid credentials in its own TokenStore:
+
+```powershell
+cargo test -p malt-gateway --test routes live_http -- --nocapture
+cargo test -p malt-gateway --test rate_limit_memory -- --nocapture
+```
+
+The CLI daemon has no token-issuance API; do not fabricate a second token or
+change the developer's credential file. The TCP fixture covers those
+multi-client scenarios without expanding this feature into credential
+management. Dated observations and measurement limits are in
+`docs/findings/2026-10-27-gateway-hardening.md`.
+
+Defaults are 100 requests/caller and 1,000 aggregate requests per 60 seconds,
+with a 2 MiB HTTP body ceiling. See `contracts/limits.md` for the four operator
+environment overrides and response headers. The original manual scenarios
+below use those defaults.
+
 ```bash
 cargo build --workspace
 ```

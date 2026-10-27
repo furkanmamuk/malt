@@ -32,7 +32,7 @@ static ALLOCATOR: MeasuredAllocator = MeasuredAllocator;
 #[test]
 fn expired_callers_release_live_heap_bytes_on_normal_access() {
     let window = Duration::from_secs(1);
-    let limiter = RateLimiter::with_window(100, window).unwrap();
+    let limiter = RateLimiter::with_limits(100, 100_000, window).unwrap();
     let baseline = LIVE_BYTES.load(Ordering::SeqCst);
     for index in 0..20_000 {
         assert!(limiter.check(&format!("caller-{index:069}")));

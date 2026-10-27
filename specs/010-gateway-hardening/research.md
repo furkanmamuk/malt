@@ -107,7 +107,16 @@ gains the data it needs to render them; the status stays `429`.
 
 ## R5. Body limits belong in the router, not the handlers
 
-**Finding.** No body limit exists: no `DefaultBodyLimit`, no
+**Correction, verified 2026-10-27.** The original finding below mistook the
+absence of an explicit limit for absence of any limit. Axum's `Bytes`/`Json`
+extractors already cap bodies at 2 MiB by default. A pre-change declared-size
+probe consumed 33 chunks of 64 KiB before returning 413. What was missing was
+pre-read declared-length rejection, an explicit bound for all routes and body
+consumers, operator tuning, and a structured refusal. Implementation retains
+the existing ceiling and enforces those missing properties during final router
+assembly. See `docs/findings/2026-10-27-gateway-hardening.md`.
+
+**Original finding (superseded).** No body limit exists: no `DefaultBodyLimit`, no
 `content_length` check anywhere in `crates/malt-gateway/src/`.
 
 **Decision.** Apply the limit at the router layer so it covers every route by

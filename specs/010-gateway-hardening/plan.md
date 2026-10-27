@@ -22,6 +22,14 @@ not a repair.
 
 ## Technical Context
 
+**Implementation reconciliation, 2026-10-27:** R5's unlimited-JSON premise was
+incorrect; axum already defaults to 2 MiB. The explicit bound is installed by
+the final auth/router assembly so routes added by `malt-bin` are included.
+`limits.rs` owns validated settings, and the small `malt-bin/src/daemon.rs`
+startup change passes operator overrides to enforcement. The CLI proof script
+exercises the actual daemon; no new dependency or route is required. These
+files extend the initial gateway-only list to make configuration reachable.
+
 **Language/Version**: Rust, edition 2021 (workspace `rust-version`)
 
 **Primary Dependencies**: `axum` 0.8 (already present; `DefaultBodyLimit`

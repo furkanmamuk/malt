@@ -62,65 +62,127 @@ async fn auth_middleware(
     rate_limiter: Arc<RateLimiter>,
     req: Request<Body>,
     next: Next,
+    body_limit: usize,
 ) -> Response {
-    let method = req.method().clone();
-    let matched_path = req
-        .extensions()
-        .get::<MatchedPath>()
-        .map(|p| p.as_str().to_string());
+    let (mut response, snapshot) = authorize_and_run(&token_store, &rate_limiter, req, next).await;
+    use crate::rate_limit::delta_seconds;
+    use axum::http::HeaderValue;
+    let headers = response.headers_mut();
+    for (name, value) in [
+        ("x-ratelimit-limit", snapshot.limit as u64),
+        ("x-ratelimit-remaining", snapshot.remaining as u64),
+        ("x-ratelimit-reset", delta_seconds(snapshot.reset)),
+        ("x-ratelimit-global-limit", snapshot.global_limit as u64),
+        (
+            "x-ratelimit-global-remaining",
+            snapshot.global_remaining as u64,
+        ),
+        (
+            "x-ratelimit-global-reset",
+            delta_seconds(snapshot.global_reset),
+        ),
+        ("x-ratelimit-window", delta_seconds(rate_limiter.window())),
+        ("x-request-body-limit", body_limit as u64),
+    ] {
+        headers.insert(name, HeaderValue::from(value));
+    }
+    response
+}
 
-    let Some(path) = matched_path else {
-        // No route matched this request at all -- shouldn't normally
-        // reach here since the layer wraps an already-routed request,
-        // but fail closed rather than assume an open default.
-        return GatewayError::Unauthorized("no matching route".to_string()).into_response();
+async fn authorize_and_run(
+    token_store: &TokenStore,
+    rate_limiter: &RateLimiter,
+    req: Request<Body>,
+    next: Next,
+) -> (Response, crate::rate_limit::RateSnapshot) {
+    let unauthenticated = |error: GatewayError| (error.into_response(), rate_limiter.observe(None));
+    let Some(path) = req.extensions().get::<MatchedPath>() else {
+        return unauthenticated(GatewayError::Unauthorized("no matching route".into()));
     };
-    let required = required_scope(&method, &path);
-
+    let required = required_scope(req.method(), path.as_str());
     let token = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-
     let Some(token) = token else {
-        return GatewayError::Unauthorized("missing bearer token".to_string()).into_response();
+        return unauthenticated(GatewayError::Unauthorized("missing bearer token".into()));
     };
-
     let Some(scope) = token_store.validate(token) else {
-        return GatewayError::Unauthorized("invalid or expired token".to_string()).into_response();
+        return unauthenticated(GatewayError::Unauthorized(
+            "invalid or expired token".into(),
+        ));
     };
     let ctx = AuthContext::with_client(scope, token.to_string());
-
-    if !rate_limiter.check(ctx.client_id()) {
-        return GatewayError::RateLimited.into_response();
-    }
-
-    if !ctx.has_scope(required) {
-        return GatewayError::Forbidden {
-            required: format!("{required:?}"),
+    // Deliberately charge admitted requests before checking scope (research R3).
+    let snapshot = match rate_limiter.admit(ctx.client_id()) {
+        Ok(snapshot) => snapshot,
+        Err(refusal) => {
+            return (
+                GatewayError::RateLimited {
+                    retry_after: refusal.retry_after,
+                    cause: refusal.cause,
+                }
+                .into_response(),
+                refusal.snapshot,
+            )
         }
-        .into_response();
+    };
+    if !ctx.has_scope(required) {
+        return (
+            GatewayError::Forbidden {
+                required: format!("{required:?}"),
+            }
+            .into_response(),
+            snapshot,
+        );
     }
-
-    next.run(req).await
+    (next.run(req).await, snapshot)
 }
 
-/// Attach real auth + rate-limit enforcement to a fully-assembled router.
-///
-/// Must be the last call in router construction — see the module doc
-/// comment for why. `malt-bin`'s ad hoc `/shutdown` route must be added
-/// to `router` *before* calling this, or it will be served unauthenticated.
+/// Protect a fully assembled router with the caller's limiter and the default
+/// body bound. Apply after every route, including externally added /shutdown.
 pub fn with_auth(
     router: Router,
     token_store: Arc<TokenStore>,
     rate_limiter: Arc<RateLimiter>,
 ) -> Router {
-    crate::server::with_body_limit(router, crate::server::DEFAULT_BODY_LIMIT).layer(
-        middleware::from_fn(move |req: Request<Body>, next: Next| {
+    assemble(
+        router,
+        token_store,
+        rate_limiter,
+        crate::server::DEFAULT_BODY_LIMIT,
+    )
+}
+
+/// Assemble validated operator settings into the actual enforcement objects.
+pub fn with_auth_configured(
+    router: Router,
+    token_store: Arc<TokenStore>,
+    limits: crate::limits::GatewayLimits,
+) -> Result<Router, crate::limits::InvalidGatewayLimits> {
+    limits.validate()?;
+    let limiter = RateLimiter::with_limits(limits.per_caller, limits.system_wide, limits.window)
+        .map_err(|error| crate::limits::InvalidGatewayLimits(error.to_string()))?;
+    Ok(assemble(
+        router,
+        token_store,
+        Arc::new(limiter),
+        limits.body_bytes,
+    ))
+}
+
+fn assemble(
+    router: Router,
+    token_store: Arc<TokenStore>,
+    rate_limiter: Arc<RateLimiter>,
+    body_limit: usize,
+) -> Router {
+    crate::server::with_body_limit(router, body_limit).layer(middleware::from_fn(
+        move |req: Request<Body>, next: Next| {
             let token_store = token_store.clone();
             let rate_limiter = rate_limiter.clone();
-            async move { auth_middleware(token_store, rate_limiter, req, next).await }
-        }),
-    )
+            async move { auth_middleware(token_store, rate_limiter, req, next, body_limit).await }
+        },
+    ))
 }

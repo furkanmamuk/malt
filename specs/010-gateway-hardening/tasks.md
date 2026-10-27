@@ -110,17 +110,17 @@ applies to every other requirement here — see research R7 for the table.
 
 ### Tests for User Story 3
 
-- [ ] T020 [P] [US3] Add a test that a client sleeping for exactly `Retry-After` then retrying **succeeds** (SC-006). **The defect this prevents**: a padded constant passes a "header is present" assertion and fails this one. That is the whole distinction.
-- [ ] T021 [P] [US3] Add a test that a quota refusal and a ceiling refusal are distinguishable from the response alone (SC-007).
-- [ ] T022 [P] [US3] Add a test that successful responses carry `X-RateLimit-Remaining` and that it decreases (contract §2). **The defect this prevents**: a limiter that only speaks when refusing teaches clients to find the limit by hitting it.
+- [X] T020 [P] [US3] Add a test that a client sleeping for exactly `Retry-After` then retrying **succeeds** (SC-006). **The defect this prevents**: a padded constant passes a "header is present" assertion and fails this one. That is the whole distinction.
+- [X] T021 [P] [US3] Add a test that a quota refusal and a ceiling refusal are distinguishable from the response alone (SC-007).
+- [X] T022 [P] [US3] Add a test that successful responses carry `X-RateLimit-Remaining` and that it decreases (contract §2). **The defect this prevents**: a limiter that only speaks when refusing teaches clients to find the limit by hitting it.
 
 ### Implementation for User Story 3
 
-- [ ] T023 [US3] Extend `GatewayError::RateLimited` in `crates/malt-gateway/src/error.rs` to carry `retry_after` and `cause` (data-model §2). **Keep the 429 status** — `error.rs:81` is already correct, and distinguishing the two causes by status would conflate the ceiling with `ExecutionQueueFull`'s 503.
-- [ ] T024 [US3] Derive `retry_after` from real window state, never a constant (contract §1). T020 is the test that catches a constant.
-- [ ] T025 [US3] Add the system-wide `Ceiling` from data-model §3, checked **in addition to** the per-caller allowance, reporting `cause: system_wide`.
-- [ ] T026 [US3] Emit rate-limit headers on **every** response, not only refusals (contract §2).
-- [ ] T027 [US3] Make each limit observable at runtime so an operator diagnosing a refusal can see the limit that caused it without reading source (contract §3).
+- [X] T023 [US3] Extend `GatewayError::RateLimited` in `crates/malt-gateway/src/error.rs` to carry `retry_after` and `cause` (data-model §2). **Keep the 429 status** — `error.rs:81` is already correct, and distinguishing the two causes by status would conflate the ceiling with `ExecutionQueueFull`'s 503.
+- [X] T024 [US3] Derive `retry_after` from real window state, never a constant (contract §1). T020 is the test that catches a constant.
+- [X] T025 [US3] Add the system-wide `Ceiling` from data-model §3, checked **in addition to** the per-caller allowance, reporting `cause: system_wide`.
+- [X] T026 [US3] Emit rate-limit headers on **every** response, not only refusals (contract §2).
+- [X] T027 [US3] Make each limit observable at runtime so an operator diagnosing a refusal can see the limit that caused it without reading source (contract §3).
 
 **Checkpoint**: all three stories functional. Gates green, commit, merge.
 
@@ -128,7 +128,7 @@ applies to every other requirement here — see research R7 for the table.
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T028 Run every scenario in [quickstart.md](./quickstart.md) against a live daemon and record the outcome in a dated `docs/findings/` entry, **including what it does not establish**. A scenario the host cannot run is recorded as skipped with its reason — **environment-blocked is not done**.
+- [X] T028 Run every scenario in [quickstart.md](./quickstart.md) against a live daemon and record the outcome in a dated `docs/findings/` entry, **including what it does not establish**. A scenario the host cannot run is recorded as skipped with its reason — **environment-blocked is not done**.
 - [ ] T029 [P] Update `docs/BACKLOG.md` and `docs/ROADMAP.md`'s "Gateway hardening (D)" section for what this closed.
 - [ ] T030 [P] Mark `docs/briefs/003-rate-limiter-has-no-window.md` **RESOLVED**, keeping its original text as the record of what was wrong (the pattern used for briefs 004, 005, 006 and 007).
 - [ ] T031 Final gates: `cargo build --workspace`, `cargo test --workspace`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`.

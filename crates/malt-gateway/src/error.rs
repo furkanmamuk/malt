@@ -18,8 +18,11 @@ pub enum GatewayError {
     #[error("forbidden: requires {required}")]
     Forbidden { required: String },
 
-    #[error("rate limited")]
-    RateLimited,
+    #[error("request allowance exhausted; retry after {}s", crate::rate_limit::delta_seconds(*retry_after))]
+    RateLimited {
+        retry_after: std::time::Duration,
+        cause: crate::rate_limit::LimitCause,
+    },
 
     #[error("bad request: {0}")]
     BadRequest(String),
@@ -69,6 +72,10 @@ struct ErrorDetail {
     requested: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     best_available: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<crate::rate_limit::LimitCause>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_secs: Option<u64>,
 }
 
 impl IntoResponse for GatewayError {
@@ -78,7 +85,7 @@ impl IntoResponse for GatewayError {
             GatewayError::PaneNotFound(_) => (StatusCode::NOT_FOUND, "pane_not_found"),
             GatewayError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
             GatewayError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden"),
-            GatewayError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            GatewayError::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             GatewayError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             GatewayError::ExecutionQueueFull(_) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "execution_queue_full")
@@ -112,10 +119,27 @@ impl IntoResponse for GatewayError {
                     }
                     _ => None,
                 },
+                cause: match &self {
+                    GatewayError::RateLimited { cause, .. } => Some(*cause),
+                    _ => None,
+                },
+                retry_after_secs: match &self {
+                    GatewayError::RateLimited { retry_after, .. } => {
+                        Some(crate::rate_limit::delta_seconds(*retry_after))
+                    }
+                    _ => None,
+                },
             },
         };
 
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        if let GatewayError::RateLimited { retry_after, .. } = self {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from(crate::rate_limit::delta_seconds(retry_after)),
+            );
+        }
+        response
     }
 }
 

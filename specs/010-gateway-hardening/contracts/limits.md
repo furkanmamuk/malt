@@ -52,7 +52,7 @@ It does not pass through `GatewayError::RateLimited` and carries no
 ```json
 { "ok": false, "error": {
     "code": "payload_too_large",
-    "message": "request body exceeds the 1 MiB limit" } }
+    "message": "request body exceeds the 2097152 byte limit" } }
 ```
 
 The message MUST state the limit. A caller told only "too large" has to
@@ -79,13 +79,24 @@ hitting it. A limiter that only speaks when refusing teaches clients to probe.
 
 | Setting | Default | Governs |
 |---|---|---|
-| per-caller allowance | *(implementation)* | FR-001, FR-003 |
-| window length | *(implementation)* | FR-001 |
-| system-wide ceiling | *(implementation)* | FR-010 |
-| request body limit | *(implementation)* | FR-005 |
+| per-caller allowance | 100 (`MALT_GATEWAY_REQUESTS_PER_WINDOW`) | FR-001, FR-003 |
+| window length | 60 seconds (`MALT_GATEWAY_WINDOW_SECS`) | FR-001 |
+| system-wide ceiling | 1,000 (`MALT_GATEWAY_GLOBAL_REQUESTS_PER_WINDOW`) | FR-010 |
+| request body limit | 2,097,152 bytes (`MALT_GATEWAY_BODY_LIMIT_BYTES`) | FR-005 |
 
-**The defaults are deliberately left to implementation**, and this is not an
-omission. FR-006 requires the body bound not to break ordinary use and SC-005
+All overrides must be positive integers. Invalid values fail daemon startup.
+The body bound counts encoded HTTP body bytes; no decompression is enabled.
+Every response also reports `X-RateLimit-Global-Limit`,
+`X-RateLimit-Global-Remaining`, `X-RateLimit-Global-Reset`,
+`X-RateLimit-Window` (seconds), and `X-Request-Body-Limit` (bytes).
+Budgets are snapshots at admission. Unauthenticated replies report zero
+caller allowance. Scope and body rejections spend admitted quota; rate
+refusals do not spend either budget. If both budgets are exhausted,
+`Retry-After` covers the later expiry. Refusal causes retain the documented
+`per_caller`/`system_wide` distinction.
+
+**The defaults were deliberately left to implementation.** FR-006 requires
+the body bound not to break ordinary use and SC-005
 requires proving it with a real payload — so the number must come from
 measuring actual `exec` and `send` bodies, not from a spec guessing. The same
 applies to rates.

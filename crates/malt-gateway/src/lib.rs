@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod backend;
 pub mod error;
+pub mod limits;
 pub mod middleware;
 pub mod rate_limit;
 pub mod routes;
@@ -10,5 +11,5 @@ pub mod types;
 
 pub use backend::GatewayBackend;
 pub use error::GatewayError;
-pub use middleware::with_auth;
+pub use middleware::{with_auth, with_auth_configured};
 pub use server::build_router;

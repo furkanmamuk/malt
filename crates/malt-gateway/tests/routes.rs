@@ -937,7 +937,10 @@ async fn execution_admission_errors_have_stable_statuses_and_codes() {
             "session_shutting_down",
         ),
         (
-            GatewayError::RateLimited,
+            GatewayError::RateLimited {
+                retry_after: std::time::Duration::from_secs(1),
+                cause: malt_gateway::rate_limit::LimitCause::PerCaller,
+            },
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
         ),
@@ -1067,4 +1070,190 @@ async fn exact_body_ceiling_and_normal_exec_send_payloads_succeed() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
+}
+
+#[tokio::test]
+async fn budget_headers_decrease_and_cover_errors_and_late_added_routes() {
+    let store = Arc::new(TokenStore::new());
+    let token = store.generate_token(AuthScope::Monitor).unwrap();
+    let router = malt_gateway::with_auth_configured(
+        build_router(Arc::new(MockBackend::new()))
+            .route("/shutdown", axum::routing::post(|| async { "bye" })),
+        store,
+        malt_gateway::limits::GatewayLimits {
+            per_caller: 5,
+            system_wide: 20,
+            body_bytes: 1024,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (index, path, status) in [
+        (0, "/health", StatusCode::OK),
+        (1, "/health", StatusCode::OK),
+        (2, "/sessions/1/history", StatusCode::FORBIDDEN),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            response.headers()["x-ratelimit-remaining"],
+            (4 - index).to_string()
+        );
+        assert_eq!(
+            response.headers()["x-ratelimit-global-remaining"],
+            (19 - index).to_string()
+        );
+        assert_eq!(response.headers()["x-request-body-limit"], "1024");
+        assert_eq!(response.headers()["x-ratelimit-window"], "60");
+    }
+    let unauthorized = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(unauthorized.headers()["x-ratelimit-remaining"], "0");
+    assert_eq!(unauthorized.headers()["x-ratelimit-global-remaining"], "17");
+    // A route added by the daemon after build_router is protected too. Use
+    // Admin here so an earlier scope refusal does not mask the body check.
+    let store = Arc::new(TokenStore::new());
+    let admin = store.generate_token(AuthScope::Admin).unwrap();
+    let router = malt_gateway::with_auth_configured(
+        axum::Router::new().route("/shutdown", axum::routing::post(|| async { "bye" })),
+        store,
+        malt_gateway::limits::GatewayLimits {
+            body_bytes: 1024,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/shutdown")
+                .header("authorization", format!("Bearer {admin}"))
+                .header("content-length", "1025")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.headers()["x-request-body-limit"], "1024");
+    assert!(response.headers().get("retry-after").is_none());
+}
+
+/// Actual TCP requests exercise hyper's framing and the production router.
+/// The backend is a session fixture; real MASH execution is checked separately
+/// by the CLI quickstart. Tokens live only in this fixture's TokenStore.
+#[tokio::test]
+async fn live_http_clients_recover_and_distinguish_shared_exhaustion() {
+    use malt_gateway::{limits::GatewayLimits, with_auth_configured};
+    use std::{
+        io::{Read, Write},
+        net::{SocketAddr, TcpStream},
+        time::Duration,
+    };
+
+    async fn request(address: SocketAddr, token: &str, declared_oversize: bool) -> (u16, String) {
+        let token = token.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let header = if declared_oversize {
+                format!("POST /sessions/1/exec HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: 134217728\r\nConnection: close\r\n\r\n")
+            } else {
+                format!("GET /health HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n")
+            };
+            stream.write_all(header.as_bytes()).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            let status = response.split_whitespace().nth(1).unwrap().parse().unwrap();
+            (status, response)
+        }).await.unwrap()
+    }
+
+    let tokens = Arc::new(TokenStore::new());
+    let a = tokens.generate_token(AuthScope::Admin).unwrap();
+    let b = tokens.generate_token(AuthScope::Admin).unwrap();
+    let c = tokens.generate_token(AuthScope::Admin).unwrap();
+    let window = Duration::from_millis(250);
+    let router = with_auth_configured(
+        build_router(Arc::new(MockBackend::new())),
+        tokens,
+        GatewayLimits {
+            per_caller: 3,
+            system_wide: 8,
+            window,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    });
+    for _ in 0..3 {
+        assert_eq!(request(address, &a, false).await.0, 200);
+    }
+    let (status, refusal) = request(address, &a, false).await;
+    assert_eq!(status, 429);
+    assert!(refusal.contains("\"cause\":\"per_caller\""));
+    assert_eq!(request(address, &b, false).await.0, 200);
+    let retry: u64 = refusal
+        .lines()
+        .find_map(|line| line.strip_prefix("retry-after: "))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(retry));
+    assert_eq!(request(address, &a, false).await.0, 200);
+    for _ in 0..3 {
+        std::thread::sleep(window);
+        for remaining in [2, 1, 0] {
+            let (status, response) = request(address, &a, false).await;
+            assert_eq!(status, 200);
+            assert!(response.contains(&format!("x-ratelimit-remaining: {remaining}\r\n")));
+        }
+    }
+    std::thread::sleep(window);
+    // Send only a large declared length, no body at all. A response proves
+    // the live server refused without waiting to buffer the payload.
+    let (status, body) = request(address, &a, true).await;
+    assert_eq!(status, 413);
+    assert!(body.contains("payload_too_large"));
+    std::thread::sleep(window);
+    for token in [&a, &a, &a, &b, &b, &b, &c, &c] {
+        assert_eq!(request(address, token, false).await.0, 200);
+    }
+    let (status, refusal) = request(address, &c, false).await;
+    assert_eq!(status, 429);
+    assert!(refusal.contains("\"cause\":\"system_wide\""));
+    eprintln!("live HTTP: caller recovery, token isolation, three sustained windows, zero-body 128 MiB refusal, aggregate exhaustion all passed at {address}");
+    stop.send(()).unwrap();
+    server.await.unwrap();
 }

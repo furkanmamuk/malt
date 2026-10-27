@@ -58,3 +58,65 @@ The limit counts encoded HTTP body bytes; no decompression layer is installed.
 
 US2 checkpoint: workspace build/test, format, and strict workspace Clippy
 passed on Windows.
+
+## US3: actionable refusals and aggregate admission
+
+The same mutex guards global and per-caller admission. Both are checked
+before spending either budget; denied rate-limit requests spend neither.
+Admitted requests still spend quota before the scope check. Refusals name
+`per_caller` or `system_wide`, preserve HTTP 429, and derive integral
+`Retry-After` seconds by rounding the real monotonic remainder upward. If
+both budgets are exhausted, the wait covers both expirations.
+
+Runtime metadata on every response includes per-caller limit, remaining and
+reset, global limit, remaining and reset, window seconds, and body bytes.
+Remaining values are snapshots at admission; concurrent requests may consume
+additional allowance afterward. Unauthenticated replies report zero available
+caller allowance and do not consume the authenticated aggregate budget.
+
+Defaults: 100 requests/caller per 60 seconds, 1,000 requests globally per the
+same window (ten full caller allowances), and 2,097,152 body bytes. Overrides
+are `MALT_GATEWAY_REQUESTS_PER_WINDOW`,
+`MALT_GATEWAY_GLOBAL_REQUESTS_PER_WINDOW`, `MALT_GATEWAY_WINDOW_SECS`, and
+`MALT_GATEWAY_BODY_LIMIT_BYTES`. All must be positive integers; malformed or
+zero values fail daemon startup. No new dependency was needed. Wiring the
+settings in `malt-bin/src/daemon.rs` was necessary to make configuration
+reachable, extending the plan's initially gateway-only file list.
+
+Focused proof includes a 24-thread admission race (nine total admissions,
+no caller over five), successful retry using only the refusal's delay,
+decreasing budgets on success and scope refusal, configuration validation,
+and coverage of routes added after `build_router`.
+
+## Live quickstart evidence
+
+`live_http_clients_recover_and_distinguish_shared_exhaustion` starts the real
+HTTP router on a random loopback port with three distinct valid tokens. TCP
+clients prove caller exhaustion/recovery, another token's immediate service,
+three sustained windows, response-only retry, global exhaustion with a
+`system_wide` cause, and declining remaining headers. A declared 128 MiB
+request receives 413 even though the client sends no body. Its backend is a
+session fixture; it does not claim MASH execution.
+
+`pwsh -NoProfile -File scripts/verify-gateway-hardening.ps1` separately starts
+the actual `malt daemon` executable on an isolated port and session store.
+Observed on Windows:
+
+- allowance headers: `2,1,0`, followed by 429 with `per_caller` cause;
+- returned retry delay: 2 seconds; exactly that wait restored 200;
+- valid 2,097,152-byte JSON request executed MASH and returned
+  `gateway-live-ok`;
+- meaningful serialized exec fixture: 65,572 bytes; send fixture: 8,204 bytes;
+- a 134,217,728-byte content stream with Expect/Continue was refused with
+  `payload_too_large`; sampled child working-set increase: 0 bytes;
+- session destruction succeeded, and graceful daemon shutdown exited 0.
+
+This RSS measurement applies to declared-length early rejection. For unknown
+or understated lengths, source-poll measurements prove that reading stops at
+the first crossing chunk; they do not measure RSS. SC-008 uses the dedicated
+allocator measurement above, since OS allocators need not return freed pages
+to RSS. The TCP fixture supplies multiple credentials without adding a
+credential-issuance API to the CLI daemon.
+
+US3 checkpoint: workspace build/test, format, and strict workspace Clippy
+passed on Windows. Linux mirror verification follows the checkpoint commit.

@@ -73,6 +73,13 @@ size limit, so a caller can make the daemon buffer an arbitrarily large
 payload. The daemon holds sessions for other callers; memory exhausted by one
 request is denied to all of them.
 
+**Premise corrected during implementation, 2026-10-27:** axum's JSON
+extractor already has a 2 MiB default. The original description above is
+retained as history. This story makes the limit explicit and configurable,
+rejects declared oversize before reading, covers all body consumers, and
+provides the structured refusal. The default remains 2 MiB to preserve
+previously accepted JSON request sizes.
+
 The refusal must happen **before** the body is read, not after.
 
 **Why this priority**: A single request can degrade the whole daemon, and

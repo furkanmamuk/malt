@@ -5,18 +5,14 @@ use malt_daemon::executor::pools::PoolConfig;
 use malt_daemon::gateway_backend::DaemonBackend;
 use malt_daemon::store::{DebouncedStore, SessionStore};
 use malt_gateway::auth::TokenStore;
-use malt_gateway::rate_limit::RateLimiter;
+use malt_gateway::limits::GatewayLimits;
 use malt_gateway::server::build_router;
-use malt_gateway::with_auth;
+use malt_gateway::with_auth_configured;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
-/// Requests allowed per client per rate-limit window. No per-endpoint or
-/// global tuning yet (see `docs/BACKLOG.md`'s Gateway-hardening items) --
-/// generous enough not to trip on normal interactive/CLI use.
-const RATE_LIMIT_PER_WINDOW: usize = 100;
-
 pub fn run_daemon(port: u16) -> Result<()> {
+    let limits = GatewayLimits::from_env()?;
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let data_dir = paths::data_dir();
@@ -57,8 +53,6 @@ pub fn run_daemon(port: u16) -> Result<()> {
                 vnp_tokens,
             );
         });
-        let rate_limiter = Arc::new(RateLimiter::new(RATE_LIMIT_PER_WINDOW));
-
         let backend = Arc::new(DaemonBackend::new(coordinator.clone()));
 
         // Shutdown channel: POST /shutdown sends signal
@@ -77,7 +71,7 @@ pub fn run_daemon(port: u16) -> Result<()> {
                 axum::Json(serde_json::json!({"ok": true, "data": "shutting down"}))
             }),
         );
-        let router = with_auth(router, token_store, rate_limiter);
+        let router = with_auth_configured(router, token_store, limits)?;
 
         let addr = format!("127.0.0.1:{port}");
         println!("malt daemon listening on {addr}");
