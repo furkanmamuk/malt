@@ -2,6 +2,13 @@
 
 **Severity**: High · **Verified**: 2026-07-26 · **Source**: audit A-05
 
+**Status: RESOLVED 2026-10-27 by Spec 010.** Monotonic windows restore
+allowance without an external reset; idle state releases its allocations on
+ordinary access. Authenticated router and live TCP/CLI checks demonstrate
+recovery, token isolation, and usable retry timing. See
+[the dated evidence](../findings/2026-10-27-gateway-hardening.md).
+The original diagnosis below is retained as history.
+
 ## What is wrong
 
 `crates/malt-gateway/src/rate_limit.rs:7`:

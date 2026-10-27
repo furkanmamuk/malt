@@ -4,7 +4,12 @@
 
 **Created**: 2026-07-26
 
-**Status**: Draft
+**Status**: Partially implemented
+
+Tracking reconciled 2026-10-27: the Windows policy and helper/image substrate
+are delivered (Specs 008/009). [tasks.md](tasks.md) retains the remaining
+adjacent-tier behavioral comparison, Linux wiring, containment-loss reporting,
+and full quickstart work. macOS wiring is out of scope while ADR-0006 stands.
 
 **Input**: User description: "When someone asks for a session to be contained, it must either genuinely be contained or the request must fail — never succeed while running uncontained."
 

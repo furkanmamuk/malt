@@ -4,7 +4,12 @@
 
 **Created**: 2026-07-28
 
-**Status**: Draft
+**Status**: Complete (2026-10-27)
+
+All 31 implementation tasks are complete. Windows workspace build/test,
+format, strict Clippy, the Linux mirror's workspace build/test, and the
+live HTTP/CLI scenarios passed. See
+[the evidence and its measurement limits](../../docs/findings/2026-10-27-gateway-hardening.md).
 
 **Input**: User description: "Boundary hardening: what an untrusted or compromised peer can send MALT, over both HTTP and VNP, and what happens when they do."
 

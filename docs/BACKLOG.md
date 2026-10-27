@@ -343,14 +343,16 @@ then credentials/rate limiting, then process termination and raw input.
   ignores the HTTP status and body, so `malt stop` can report success after a
   401. Fix: construct or reload the client after daemon startup, and treat
   non-success statuses as errors.
-- **A-05 (High). Rate limiting is a permanent lifetime counter.**
-  `RateLimiter` keeps only a token→count map and increments forever; no
-  production path ever refills or evicts. A valid token therefore reaches a
-  permanent 429 after 100 requests for the life of the daemon. Also missing
-  the architecture's per-session and global dimensions, rate metadata, and
-  request-body size limits. Fix: a monotonic-clock window or bucket with
-  eviction, plus the missing dimensions, plus bounding bodies before handlers
-  allocate. (Wired in during 0a without noticing it never refills.)
+- **A-05 — FIXED by Spec 010, 2026-10-27.** Fixed monotonic windows restore
+  allowance without a reset caller and reclaim idle allocation. Per-caller
+  and aggregate admission are atomic; 429 responses identify the cause and
+  carry a usable retry delay. All responses expose budgets and active limits.
+  The router enforces a configurable 2 MiB default body bound, rejects declared
+  oversize before reading, and stops unknown-length streams at the bound.
+  The original "unlimited JSON bodies" claim overlooked axum's default limit;
+  the dated evidence retains that correction. Per-session/per-route quotas
+  remain outside this feature. See
+  `docs/findings/2026-10-27-gateway-hardening.md`.
 - **A-06 (High). `ProcessSupervisor::kill` only removes bookkeeping.** It
   drops the map entry; dropping the `Child` does not terminate anything —
   Unix only nonblocking-reaps and Windows just closes the handle. Restored
@@ -990,25 +992,17 @@ Full evidence in `docs/findings/2026-07-26-spec-006-quickstart-verification.md`.
   the same "how does a spawned-outside-mash process get containment"
   question. See `docs/findings/2026-07-24-audit-isolation-safety.md`
   item 5.
-- **Privileged helper entitlement authority is not designed yet — fail-closed
-  since 2026-07-26.** `malt-elevate` now runs as an explicit-UAC Windows
-  service with an authenticated VNP named pipe, but every operation request
-  returns `Refused{NotEntitled}`. The pipe's peer SID authenticates a Windows
-  user, not an authorised MALT daemon or its session resources; persisted
-  sessions currently record no helper-verifiable owner, PID membership, or
-  canonical storage root. Before enabling `ManageHcsContainer` or
-  `CreateSymlink` over this boundary, decide and implement a helper-owned
-  enrollment authority that can validate those claims independently. This is
-  the security prerequisite for spec 008 US2/US3, not an available fallback.
-- **Restricted tokens and HCS bindings are genuinely fail-closed and
-  well-tested at the function level, but completely unreferenced by any
-  live spawn path** — lower urgency than the P0 Windows Job Object items
-  because the functions themselves are already correct; the fix is wiring
-  them into `apply_session_isolation` once it's made tier-aware (P1
-  above), not correctness work on the functions. HCS's real native path
-  specifically remains unverified on real hardware (needs Windows
-  Containers installed; only fake-mode tested). See
-  `docs/findings/2026-07-24-audit-isolation-safety.md` items 2, 3.
+- **Helper entitlement authority — delivered by Spec 008.** Explicit daemon
+  enrollment and session owner/PID/storage-root validation implement
+  `docs/adr/ADR-0006-helper-session-entitlement-authority.md`. Spec 009 adds
+  helper-owned Windows image layers and live contained execution/cleanup
+  evidence. The former all-operations-NotEntitled state is historical; see
+  `docs/findings/2026-07-27-windows-image-provisioning.md`.
+- **Restricted-token/AppContainer expansion remains deferred.** The old
+  grouped claim that HCS had no live caller is superseded by Specs 008/009:
+  helper-mediated HCS process spawning and image layers have live Windows
+  evidence. This does not establish an AppContainer session backend or Linux
+  isolation wiring; those are separate work.
 - **AppContainer and CRIU were not ported from carboy-isolation, on
   purpose** — both were stubs/placeholders in carboy itself (AppContainer's
   restricted-token function is a documented zero-isolation fallback; CRIU

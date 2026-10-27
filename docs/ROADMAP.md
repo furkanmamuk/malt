@@ -81,14 +81,17 @@ None of these exist; all were checked on 2026-07-28.
 
 ## Gateway hardening (D)
 
-**Now specced as `specs/010-gateway-hardening/`.** Scoping it on 2026-07-28
-verified each item and removed two:
+**Implemented as `specs/010-gateway-hardening/`, 2026-10-27.** Evidence:
+`docs/findings/2026-10-27-gateway-hardening.md`.
 
-- **Rate limiter has no window** (`docs/briefs/003`) — still true, and worse
-  than written: `refill`/`refill_all` have **zero production callers**, so a
-  client is refused until the daemon restarts. Spec 010 US1.
-- **No request body limit** on `/exec` and `/send` — still true. Spec 010 US2.
-- **No global ceiling, no retry hints** on refusals — still true. Spec 010 US3.
+- **Rate-limit recovery delivered:** monotonic windows, automatic reclamation
+  of expired keys and excess allocation, with no external reset methods.
+- **Explicit body bound delivered:** router-wide 2 MiB default, configurable,
+  declared-size rejection before reading, bounded streaming, structured 413.
+  The earlier "no limit" claim overlooked axum's existing JSON default.
+- **Aggregate admission and retry hints delivered:** a shared ceiling,
+  per-caller/system-wide causes, derived retry timing, and budget headers.
+  Operator overrides reach the actual daemon startup path.
 - ~~Per-endpoint scope enforcement~~ — **not a gap.** `middleware.rs` maps
   `(Method, path)` to a scope and defaults `_ => AuthScope::Admin`, so an
   unmapped route demands the *highest* scope. Two sources of truth is a

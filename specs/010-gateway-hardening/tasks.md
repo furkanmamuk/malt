@@ -129,9 +129,9 @@ applies to every other requirement here — see research R7 for the table.
 ## Phase 6: Polish & Cross-Cutting
 
 - [X] T028 Run every scenario in [quickstart.md](./quickstart.md) against a live daemon and record the outcome in a dated `docs/findings/` entry, **including what it does not establish**. A scenario the host cannot run is recorded as skipped with its reason — **environment-blocked is not done**.
-- [ ] T029 [P] Update `docs/BACKLOG.md` and `docs/ROADMAP.md`'s "Gateway hardening (D)" section for what this closed.
-- [ ] T030 [P] Mark `docs/briefs/003-rate-limiter-has-no-window.md` **RESOLVED**, keeping its original text as the record of what was wrong (the pattern used for briefs 004, 005, 006 and 007).
-- [ ] T031 Final gates: `cargo build --workspace`, `cargo test --workspace`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`.
+- [X] T029 [P] Update `docs/BACKLOG.md` and `docs/ROADMAP.md`'s "Gateway hardening (D)" section for what this closed.
+- [X] T030 [P] Mark `docs/briefs/003-rate-limiter-has-no-window.md` **RESOLVED**, keeping its original text as the record of what was wrong (the pattern used for briefs 004, 005, 006 and 007).
+- [X] T031 Final gates: `cargo build --workspace`, `cargo test --workspace`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`.
   - **`cargo test --workspace` needs `MASH` set** or the Smoosh test fails and reads like a regression: `$env:MASH = (Resolve-Path .\target\debug\mash.exe).Path`
   - **Linux via `bash scripts/wsl-mirror.sh`**, not `/mnt/c` — and not `/tmp` for the target dir, which is a RAM-backed tmpfs here.
   - **Smoosh is not a gate** for this feature; neither `mash` nor `malt-tools` is touched. Stated so its absence is not read as an oversight.

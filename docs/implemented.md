@@ -51,7 +51,10 @@ built and why" is `specs/`. Re-verify before relying on anything below.
 - Auth: scopes (Monitor < Read < Interact < Admin), TokenStore with bearer tokens, token file persistence
 - SSE event stream: `GET /sessions/{id}/events` (Read scope), `Last-Event-ID` resume, bounded per-subscriber delivery
 - SSE output stream (2026-07-26, spec 006): `GET /sessions/{id}/output/stream` (Read scope) — same `Last-Event-ID`/bounded-delivery shape as the event stream, but carrying base64-encoded stdout/stderr chunks instead of lifecycle events
-- Token bucket rate limiter
+- Monotonic fixed-window rate limiting (Spec 010, 2026-10-27): per-caller and
+  aggregate allowance, access-driven reclamation, derived retry hints and
+  response budgets; configurable router-wide 2 MiB body bound. Defaults and
+  operator overrides: `specs/010-gateway-hardening/contracts/limits.md`.
 - Shadow tree: FrameElement → semantic JSON (styled spans with RGB)
 
 ### MCP Server (malt-mcp)

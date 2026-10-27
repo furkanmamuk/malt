@@ -120,3 +120,26 @@ credential-issuance API to the CLI daemon.
 
 US3 checkpoint: workspace build/test, format, and strict workspace Clippy
 passed on Windows. Linux mirror verification follows the checkpoint commit.
+
+## Final gates and cleanup
+
+Final Windows workspace build/test, format, and strict workspace Clippy passed.
+The repeat CLI probe again returned the same values above and exited 0; its
+temporary 128 MiB payload was removed. The helper remained installed/stopped,
+and no developer session was created or destroyed by the proof fixture.
+
+`bash scripts/wsl-mirror.sh` first stopped before compilation because the
+Windows checkout had CRLF shell-script endings. A repository `*.sh text eol=lf`
+attribute and normalization fixed that entry point. The mirror then synced
+commit `771cb96`, built the complete workspace on the Linux filesystem, and
+passed the complete workspace tests, including conformance and doc-tests.
+Existing Linux-only unused-import/variable warnings in platform/helper-client
+code remained warnings; Linux strict Clippy was not claimed as a gate.
+
+Spec 008's stale Draft status now points to its completed task list and prior
+host evidence. Spec 007 records its delivered Windows helper/image prerequisite
+and explicitly excludes macOS wiring under ADR-0006, while retaining its
+unfinished comparisons, Linux backend, containment-loss, and quickstart work.
+The rate-limit brief, backlog, roadmap, implemented inventory, and release
+notes now reflect Spec 010. No new hosted CI run is claimed by these local
+checks.
