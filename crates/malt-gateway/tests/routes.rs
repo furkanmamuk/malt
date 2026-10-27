@@ -953,3 +953,118 @@ async fn execution_admission_errors_have_stable_statuses_and_codes() {
         assert_eq!(json["error"]["code"], code);
     }
 }
+
+#[tokio::test]
+async fn oversized_declared_body_is_not_polled() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_stream::StreamExt;
+    let (router, token) = app();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let observed = polls.clone();
+    let stream = tokio_stream::iter(0..2048).map(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok::<_, std::io::Error>(vec![b' '; 64 * 1024])
+    });
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/sessions/1/exec")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .header("content-length", (128 * 1024 * 1024).to_string())
+                .body(Body::from_stream(stream))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        0,
+        "declared oversize must be rejected before any body poll"
+    );
+    let json: serde_json::Value = serde_json::from_slice(
+        &BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(json["error"]["code"], "payload_too_large");
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("2097152"));
+}
+
+#[tokio::test]
+async fn streaming_body_stops_at_the_bound_even_when_length_is_missing_or_false() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_stream::StreamExt;
+    for declared in [None, Some("1")] {
+        let (router, token) = app();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = polls.clone();
+        let stream = tokio_stream::iter(0..2048).map(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, std::io::Error>(vec![b' '; 64 * 1024])
+        });
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/sessions/1/send")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json");
+        if let Some(length) = declared {
+            request = request.header("content-length", length);
+        }
+        let response = router
+            .oneshot(request.body(Body::from_stream(stream)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        // Count source production, not just status: only the crossing chunk
+        // may be read, never the remaining ~126 MiB. RSS is allocator-dependent.
+        assert_eq!(polls.load(Ordering::SeqCst), 33);
+        let json: serde_json::Value = serde_json::from_slice(
+            &BodyExt::collect(response.into_body())
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(json["error"]["code"], "payload_too_large");
+    }
+}
+
+#[tokio::test]
+async fn exact_body_ceiling_and_normal_exec_send_payloads_succeed() {
+    let (router, token) = app();
+    let mut exact = serde_json::to_vec(&serde_json::json!({"command":"echo boundary"})).unwrap();
+    exact.resize(2 * 1024 * 1024, b' ');
+    let command = format!("echo large #{}", "x".repeat(64 * 1024));
+    let exec = serde_json::to_vec(&serde_json::json!({"command":command})).unwrap();
+    let send = serde_json::to_vec(&serde_json::json!({"input":"x".repeat(8 * 1024)})).unwrap();
+    eprintln!(
+        "measured JSON request bytes: exec={} send={} ceiling={}",
+        exec.len(),
+        send.len(),
+        exact.len()
+    );
+    for (path, body) in [("exec", exact), ("exec", exec), ("send", send)] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/1/{path}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}

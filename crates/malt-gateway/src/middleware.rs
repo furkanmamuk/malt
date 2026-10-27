@@ -116,11 +116,11 @@ pub fn with_auth(
     token_store: Arc<TokenStore>,
     rate_limiter: Arc<RateLimiter>,
 ) -> Router {
-    router.layer(middleware::from_fn(
-        move |req: Request<Body>, next: Next| {
+    crate::server::with_body_limit(router, crate::server::DEFAULT_BODY_LIMIT).layer(
+        middleware::from_fn(move |req: Request<Body>, next: Next| {
             let token_store = token_store.clone();
             let rate_limiter = rate_limiter.clone();
             async move { auth_middleware(token_store, rate_limiter, req, next).await }
-        },
-    ))
+        }),
+    )
 }

@@ -11,7 +11,7 @@ expired keys plus excess hash-table capacity on ordinary request access.
 
 The body-limit premise in the July specification was too broad. Axum's
 `Bytes`/`Json` extractors already default to a 2 MiB limit (`axum-core`'s
-`extract/default_body_limit.rs` and `extract/request_parts.rs`). Absence of an
+`extract/default_body_limit.rs` and `ext_traits/request.rs`). Absence of an
 explicit layer did not establish unlimited JSON buffering. The remaining work
 is an explicit, configurable, router-wide bound, pre-read Content-Length
 refusal, streaming enforcement, and the structured error contract. This
@@ -38,3 +38,23 @@ still includes its normal conformance runner. macOS is unsupported (ADR-0006).
 
 US1 checkpoint: workspace build, exact workspace tests, format, and strict
 workspace Clippy all passed on Windows.
+
+## US2: body bound
+
+The pre-change declared-length regression returned 413 only after producing
+33 chunks of 64 KiB; it failed the zero-polls assertion. With the router
+middleware, a declared 128 MiB request is refused with zero source polls.
+Unknown and falsely small lengths consume exactly 33 chunks (the 2 MiB bound
+plus one crossing chunk), then stop producing the remaining ~126 MiB.
+These source-consumption tests establish bounded reading directly; they do
+not claim to measure process RSS.
+
+Measured serialized request fixtures: 65,562-byte exec (64 KiB comment plus a
+real command), 8,204-byte send (8 KiB raw input), and a valid JSON command
+padded to exactly 2,097,152 bytes. All pass through the authenticated routes.
+The default retains axum's 2 MiB JSON ceiling and applies it explicitly to
+all routes, including routes added before the final `with_auth` call.
+The limit counts encoded HTTP body bytes; no decompression layer is installed.
+
+US2 checkpoint: workspace build/test, format, and strict workspace Clippy
+passed on Windows.

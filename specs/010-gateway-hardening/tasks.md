@@ -87,16 +87,16 @@ applies to every other requirement here — see research R7 for the table.
 
 ### Tests for User Story 2
 
-- [ ] T013 [P] [US2] Add a test in `crates/malt-gateway/tests/routes.rs`: a body above the limit is rejected with 413 and the documented `payload_too_large` code (contract §1).
-- [ ] T014 [US2] Add the assertion that matters (SC-004): **the daemon does not buffer the oversized body**. A 413 returned *after* buffering 100 MB is the defect fully present and is indistinguishable from the fix by status code alone. If memory cannot be measured in-test, state what is asserted instead and why — research R7.
-- [ ] T015 [P] [US2] Add a test that a payload at the documented ceiling for ordinary use **succeeds** (SC-005, FR-006). **The defect this prevents**: a limit tight enough to reject legitimate `exec` bodies is a regression shipped as hardening.
+- [X] T013 [P] [US2] Add a test in `crates/malt-gateway/tests/routes.rs`: a body above the limit is rejected with 413 and the documented `payload_too_large` code (contract §1).
+- [X] T014 [US2] Add the assertion that matters (SC-004): **the daemon does not buffer the oversized body**. A 413 returned *after* buffering 100 MB is the defect fully present and is indistinguishable from the fix by status code alone. If memory cannot be measured in-test, state what is asserted instead and why — research R7.
+- [X] T015 [P] [US2] Add a test that a payload at the documented ceiling for ordinary use **succeeds** (SC-005, FR-006). **The defect this prevents**: a limit tight enough to reject legitimate `exec` bodies is a regression shipped as hardening.
 
 ### Implementation for User Story 2
 
-- [ ] T016 [US2] Apply the body limit at the **router layer** in `crates/malt-gateway/src/server.rs`, not in individual handlers (research R5). **The defect this prevents**: a per-handler check means a route added later without one is silently unprotected — the same weakness the scope map already has.
-- [ ] T017 [US2] Choose the limit by **measuring real `exec` and `send` bodies**, not by guessing. The spec and contract deliberately leave the number to implementation for exactly this reason. Record the measurement in the commit message.
-- [ ] T018 [US2] Ensure a request that understates its length and then exceeds the bound is refused mid-stream (FR-007). A declared-`Content-Length` rejection is easy and is only half the requirement.
-- [ ] T019 [US2] Make the refusal message state the limit (contract §1). **The defect this prevents**: a caller told only "too large" has to bisect to find the boundary.
+- [X] T016 [US2] Apply the body limit at the **router layer** in `crates/malt-gateway/src/server.rs`, not in individual handlers (research R5). **The defect this prevents**: a per-handler check means a route added later without one is silently unprotected — the same weakness the scope map already has.
+- [X] T017 [US2] Choose the limit by **measuring real `exec` and `send` bodies**, not by guessing. The spec and contract deliberately leave the number to implementation for exactly this reason. Record the measurement in the commit message.
+- [X] T018 [US2] Ensure a request that understates its length and then exceeds the bound is refused mid-stream (FR-007). A declared-`Content-Length` rejection is easy and is only half the requirement.
+- [X] T019 [US2] Make the refusal message state the limit (contract §1). **The defect this prevents**: a caller told only "too large" has to bisect to find the boundary.
 
 **Checkpoint**: US1 and US2 both ship. Gates green, commit.
 
