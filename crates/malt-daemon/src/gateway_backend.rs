@@ -263,7 +263,7 @@ fn to_image_response(image: malt_protocol::elevate::ProvisionedImage) -> ImageRe
 }
 
 fn reconcile_image_response(mut image: ImageResponse, daemon_sessions: &[u32]) -> ImageResponse {
-    let daemon_count = u32::try_from(daemon_sessions.len()).map_or(u32::MAX, |count| count);
+    let daemon_count = u32::try_from(daemon_sessions.len()).unwrap_or(u32::MAX);
     // The helper is authoritative for its live compute systems; the daemon is
     // authoritative for session admission. Keep the conservative maximum when
     // a helper restart or lost response makes either observation incomplete.

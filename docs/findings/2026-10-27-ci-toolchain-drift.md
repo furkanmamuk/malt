@@ -16,3 +16,9 @@ Local verification: helper admission test, shell lexer/executor tests, native
 Windows Smoosh (183 passed, three unsupported skips via its runner), format,
 and strict workspace Clippy passed. A new hosted run is required to establish
 the repaired CI result.
+
+Run `40516456513` passed Linux build/tests and the path-triggered Windows
+Smoosh job, but strict Windows Clippy then exposed `map_or_identity` in the
+Gateway's saturating session-count conversion. Replaced the identity `map_or`
+with `unwrap_or(u32::MAX)` (a non-panicking fallback, not `unwrap()`). The
+repair remains separate from the resumed Spec 007 enforcement work.
