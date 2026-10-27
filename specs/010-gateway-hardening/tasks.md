@@ -39,7 +39,7 @@ applies to every other requirement here — see research R7 for the table.
 
 ## Phase 1: Setup
 
-- [ ] T001 Confirm no new dependency is needed. `axum` 0.8 already provides `DefaultBodyLimit`, and the window needs only `std::time`. **If you find yourself reaching for a rate-limiting crate, stop and justify it against a `HashMap` and an `Instant`** — this is 44 lines of state, and a dependency here buys behaviour nobody has asked for.
+- [X] T001 Confirm no new dependency is needed. `axum` 0.8 already provides `DefaultBodyLimit`, and the window needs only `std::time`. **If you find yourself reaching for a rate-limiting crate, stop and justify it against a `HashMap` and an `Instant`** — this is 44 lines of state, and a dependency here buys behaviour nobody has asked for.
 
 ---
 
@@ -47,10 +47,10 @@ applies to every other requirement here — see research R7 for the table.
 
 **⚠️ Blocks all three stories** — every one of them reads or reports allowance state.
 
-- [ ] T002 Replace the state in `crates/malt-gateway/src/rate_limit.rs` with the `Allowance` shape from [data-model.md](./data-model.md) §1: `used` plus `window_started`, evaluated on access. **Do not add a window to the existing counter** — `max_per_window` names a window that does not exist, and the file imports neither `Instant` nor `Duration`. The concept is absent, not broken.
-- [ ] T003 **Delete `refill` and `refill_all`** from `rate_limit.rs`. They have zero production callers (verified 2026-07-28) and FR-002 forbids restoring allowance by an external call. **The defect this prevents**: a reset method that only works when something remembers to call it is exactly the state that produced this bug; keeping them "just in case" reproduces it.
-- [ ] T004 Keep the poison-tolerant lock form `.lock().unwrap_or_else(|e| e.into_inner())` already in `rate_limit.rs:23`. **The defect this prevents**: `.unwrap()` on a poisoned mutex cascades one panic into unrelated failures — AGENTS.md records nine such call sites found in `mash`, and this file already has it right.
-- [ ] T005 Update `crates/malt-gateway/tests/rate_limit.rs::refill_resets` — it exercises a method T003 deletes. **Replace it with the time-based recovery test, do not just delete it**: it is the only existing test about allowance returning, and removing it leaves that property uncovered.
+- [X] T002 Replace the state in `crates/malt-gateway/src/rate_limit.rs` with the `Allowance` shape from [data-model.md](./data-model.md) §1: `used` plus `window_started`, evaluated on access. **Do not add a window to the existing counter** — `max_per_window` names a window that does not exist, and the file imports neither `Instant` nor `Duration`. The concept is absent, not broken.
+- [X] T003 **Delete `refill` and `refill_all`** from `rate_limit.rs`. They have zero production callers (verified 2026-07-28) and FR-002 forbids restoring allowance by an external call. **The defect this prevents**: a reset method that only works when something remembers to call it is exactly the state that produced this bug; keeping them "just in case" reproduces it.
+- [X] T004 Keep the poison-tolerant lock form `.lock().unwrap_or_else(|e| e.into_inner())` already in `rate_limit.rs:23`. **The defect this prevents**: `.unwrap()` on a poisoned mutex cascades one panic into unrelated failures — AGENTS.md records nine such call sites found in `mash`, and this file already has it right.
+- [X] T005 Update `crates/malt-gateway/tests/rate_limit.rs::refill_resets` — it exercises a method T003 deletes. **Replace it with the time-based recovery test, do not just delete it**: it is the only existing test about allowance returning, and removing it leaves that property uncovered.
 
 **Checkpoint**: the limiter has a clock; nothing else has changed yet.
 
@@ -64,16 +64,16 @@ applies to every other requirement here — see research R7 for the table.
 
 ### Tests for User Story 1
 
-- [ ] T006 [P] [US1] Add a recovery test in `crates/malt-gateway/tests/rate_limit.rs` that exhausts the allowance, **advances past the window**, and asserts the next request succeeds (SC-001). **Assert on the request's outcome, not on internal counters** — the counter can look right while the caller is still refused.
-- [ ] T007 [P] [US1] Add a sustained-rate test: a caller pacing itself under the limit is never refused across several windows (SC-002). **The defect this prevents**: a window that resets to a full allowance but also counts the triggering request against the *old* window can refuse a well-behaved caller at every boundary.
-- [ ] T008 [P] [US1] Add a two-client isolation test (SC-003). **Use two distinct valid bearer tokens** — `client_id` is the token itself (research R2), so two arbitrary strings do not exercise the isolation this asserts.
-- [ ] T009 [US1] Add a reclamation test (SC-008): after many distinct clients have been seen and their windows have elapsed, limiter state returns to a bounded level. **If this cannot be observed reliably, say so in the test and assert the closest honest thing** — do not fall back to counting map entries, which is the proxy that passes today.
+- [X] T006 [P] [US1] Add a recovery test in `crates/malt-gateway/tests/rate_limit.rs` that exhausts the allowance, **advances past the window**, and asserts the next request succeeds (SC-001). **Assert on the request's outcome, not on internal counters** — the counter can look right while the caller is still refused.
+- [X] T007 [P] [US1] Add a sustained-rate test: a caller pacing itself under the limit is never refused across several windows (SC-002). **The defect this prevents**: a window that resets to a full allowance but also counts the triggering request against the *old* window can refuse a well-behaved caller at every boundary.
+- [X] T008 [P] [US1] Add a two-client isolation test (SC-003). **Use two distinct valid bearer tokens** — `client_id` is the token itself (research R2), so two arbitrary strings do not exercise the isolation this asserts.
+- [X] T009 [US1] Add a reclamation test (SC-008): after many distinct clients have been seen and their windows have elapsed, limiter state returns to a bounded level. **If this cannot be observed reliably, say so in the test and assert the closest honest thing** — do not fall back to counting map entries, which is the proxy that passes today.
 
 ### Implementation for User Story 1
 
-- [ ] T010 [US1] Implement window evaluation on access in `rate_limit.rs`: if the window has elapsed, reset and count the current request against the **new** window (data-model §1's state diagram). A caller returning after a long gap is served immediately.
-- [ ] T011 [US1] Implement entry reclamation for allowances whose window elapsed long ago (FR-004). **It must happen during normal operation, not in a sweep something has to call** — that is `refill`'s failure one level up. An entry with an elapsed window carries no information; it is indistinguishable from a client never seen.
-- [ ] T012 [US1] Verify `crates/malt-gateway/src/middleware.rs:95` still compiles against the new signature and that the **check-before-scope order is unchanged**. Research R3 records that ordering as deliberate: reversing it lets an unauthorised caller probe routes for free. If you change it, say why in the commit.
+- [X] T010 [US1] Implement window evaluation on access in `rate_limit.rs`: if the window has elapsed, reset and count the current request against the **new** window (data-model §1's state diagram). A caller returning after a long gap is served immediately.
+- [X] T011 [US1] Implement entry reclamation for allowances whose window elapsed long ago (FR-004). **It must happen during normal operation, not in a sweep something has to call** — that is `refill`'s failure one level up. An entry with an elapsed window carries no information; it is indistinguishable from a client never seen.
+- [X] T012 [US1] Verify `crates/malt-gateway/src/middleware.rs:95` still compiles against the new signature and that the **check-before-scope order is unchanged**. Research R3 records that ordering as deliberate: reversing it lets an unauthorised caller probe routes for free. If you change it, say why in the commit.
 
 **Checkpoint**: US1 ships alone and closes the live defect. Gates green, commit.
 
