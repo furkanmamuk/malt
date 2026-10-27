@@ -1,0 +1,2 @@
+# Shell entry points run directly under WSL/Linux even in Windows checkouts.
+*.sh text eol=lf
