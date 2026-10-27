@@ -83,7 +83,6 @@ fn job_object_teardown_kills_its_real_process_tree() {
 #[test]
 #[ignore]
 fn isolation_memory_hog_helper() {
-    std::thread::sleep(std::time::Duration::from_millis(500));
     let mut bytes = vec![0u8; 64 * 1024 * 1024];
     for byte in bytes.iter_mut().step_by(4096) {
         *byte = 1;
@@ -98,22 +97,34 @@ fn isolation_memory_hog_helper() {
 #[cfg(windows)]
 #[test]
 fn capped_memory_limit_binds_where_restricted_does_not() {
-    use malt_platform::isolation::job_objects;
-    use std::process::Command;
+    use malt_platform::isolation::{job_objects, IsolationContext};
+    use malt_platform::process::{spawn_in_isolation, SpawnConfig};
+    use std::sync::Arc;
 
-    fn spawn_memory_hog() -> std::process::Child {
-        Command::new(std::env::current_exe().expect("current integration-test executable"))
-            .args([
-                "--exact",
-                "isolation_memory_hog_helper",
-                "--ignored",
-                "--nocapture",
-            ])
-            .spawn()
-            .expect("spawn the isolated memory-hog helper")
+    fn spawn_memory_hog(context: &IsolationContext) -> malt_platform::process::Child {
+        let config =
+            SpawnConfig::new(std::env::current_exe().expect("current integration-test executable"))
+                .args([
+                    "--exact",
+                    "isolation_memory_hog_helper",
+                    "--ignored",
+                    "--nocapture",
+                ]);
+        spawn_in_isolation(config, context).expect("spawn the isolated memory-hog helper")
     }
 
-    let restricted_status = spawn_memory_hog()
+    let restricted = IsolationContext::restricted();
+    restricted
+        .establish_job_object(Arc::new(
+            job_objects::create_job_object(
+                &format!("malt-isolation-restricted-memory-{}", std::process::id()),
+                0,
+                0,
+            )
+            .expect("create restricted job"),
+        ))
+        .expect("establish restricted job");
+    let restricted_status = spawn_memory_hog(&restricted)
         .wait()
         .expect("wait for unrestricted helper");
     assert!(
@@ -121,16 +132,216 @@ fn capped_memory_limit_binds_where_restricted_does_not() {
         "the same work must complete when no Capped resource limit is present"
     );
 
-    let mut capped_child = spawn_memory_hog();
-    let capped_job = job_objects::create_job_object("malt-isolation-capped-memory", 16, 0)
-        .expect("create capped Job Object");
-    job_objects::assign_process_to_job(&capped_job, capped_child.id())
-        .expect("assign helper before its delayed allocation");
+    let capped_job = job_objects::create_job_object(
+        &format!("malt-isolation-capped-memory-{}", std::process::id()),
+        16,
+        0,
+    )
+    .expect("create capped Job Object");
+    let capped = IsolationContext::capped();
+    capped
+        .establish_job_object(Arc::new(capped_job))
+        .expect("establish capped job");
+    let mut capped_child = spawn_memory_hog(&capped);
     let capped_status = capped_child.wait().expect("wait for capped helper");
     assert!(
         !capped_status.success(),
         "a 64 MiB allocation must not complete inside the 16 MiB capped Job Object"
     );
+}
+
+/// The first action in a freshly launched process checks membership in the
+/// specific session job, not just any outer CI/terminal job.
+#[cfg(windows)]
+#[test]
+#[ignore = "subprocess probe invoked by isolated_launch_is_assigned_before_child_code"]
+fn isolation_membership_helper() {
+    use std::ffi::CString;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{IsProcessInJob, OpenJobObjectA};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let name = CString::new(std::env::var("MALT_TEST_JOB_NAME").expect("child job name")).unwrap();
+    // SAFETY: name is NUL-terminated; query-only handle is closed below.
+    let job = unsafe {
+        OpenJobObjectA(0x0004 /* JOB_OBJECT_QUERY */, 0, name.as_ptr().cast())
+    };
+    assert!(!job.is_null());
+    let mut member = 0;
+    // SAFETY: both handles are valid and the output pointer is writable.
+    let result = unsafe { IsProcessInJob(GetCurrentProcess(), job, &mut member) };
+    // SAFETY: this test owns the handle returned by OpenJobObjectA.
+    unsafe {
+        CloseHandle(job);
+    }
+    assert_ne!(result, 0);
+    assert_ne!(
+        member, 0,
+        "child code ran before session Job Object assignment"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn isolated_launch_is_assigned_before_child_code() {
+    use malt_platform::isolation::{job_objects, IsolationContext};
+    use malt_platform::process::{spawn_in_isolation, Io, SpawnConfig};
+    use std::sync::Arc;
+    let name = format!("malt-first-instruction-{}", std::process::id());
+    let context = IsolationContext::restricted();
+    context
+        .establish_job_object(Arc::new(
+            job_objects::create_job_object(&name, 0, 0).unwrap(),
+        ))
+        .unwrap();
+    for _ in 0..16 {
+        let config = SpawnConfig::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "isolation_membership_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("MALT_TEST_JOB_NAME", &name)
+            .stdin(Io::Null)
+            .stdout(Io::Null)
+            .stderr(Io::Null);
+        assert!(spawn_in_isolation(config, &context)
+            .unwrap()
+            .wait()
+            .unwrap()
+            .success());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn assignment_failure_never_executes_child_and_invalidates_session() {
+    use malt_platform::isolation::{job_objects, IsolationContext};
+    use malt_platform::process::{spawn_in_isolation, Io, SpawnConfig, SpawnError};
+    use std::sync::Arc;
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    let job = Arc::new(
+        job_objects::create_job_object(
+            &format!("malt-admission-failure-{}", std::process::id()),
+            0,
+            0,
+        )
+        .unwrap(),
+    );
+    let limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        BasicLimitInformation:
+            windows_sys::Win32::System::JobObjects::JOBOBJECT_BASIC_LIMIT_INFORMATION {
+                LimitFlags: JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                ActiveProcessLimit: 1,
+                ..Default::default()
+            },
+        ..Default::default()
+    };
+    // SAFETY: job is live, and limits has the exact extended-information ABI.
+    assert_ne!(
+        unsafe {
+            SetInformationJobObject(
+                job.handle() as _,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        },
+        0
+    );
+    let context = IsolationContext::restricted();
+    context.establish_job_object(job.clone()).unwrap();
+    let holder = SpawnConfig::new("cmd.exe")
+        .args(["/d", "/c", "set /p hold="])
+        .stdin(Io::Pipe)
+        .stdout(Io::Null)
+        .stderr(Io::Null);
+    let mut holder = spawn_in_isolation(holder, &context).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("escaped.txt");
+    let request = || {
+        SpawnConfig::new("cmd.exe")
+            .args([
+                "/d",
+                "/c",
+                &format!("echo escaped>\"{}\"", marker.display()),
+            ])
+            .stdin(Io::Null)
+            .stdout(Io::Null)
+            .stderr(Io::Null)
+    };
+    assert!(matches!(
+        spawn_in_isolation(request(), &context),
+        Err(SpawnError::Isolation(_))
+    ));
+    assert!(context.loss_reason().unwrap().is_some());
+    // Even after the capacity is freed, loss is terminal rather than a silent
+    // retry with weaker enforcement or an implicit upgrade.
+    drop(holder.take_stdin());
+    holder.wait().unwrap();
+    assert!(matches!(
+        spawn_in_isolation(request(), &context),
+        Err(SpawnError::Isolation(_))
+    ));
+    assert!(!marker.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn restricted_teardown_kills_work_that_bare_teardown_leaves_running() {
+    use malt_platform::isolation::{job_objects, IsolationContext};
+    use malt_platform::process::{spawn_in_isolation, Io, SpawnConfig};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    for restricted in [false, true] {
+        let context = if restricted {
+            let context = IsolationContext::restricted();
+            context
+                .establish_job_object(Arc::new(
+                    job_objects::create_job_object(
+                        &format!("malt-adjacent-teardown-{}", std::process::id()),
+                        0,
+                        0,
+                    )
+                    .unwrap(),
+                ))
+                .unwrap();
+            context
+        } else {
+            IsolationContext::bare()
+        };
+        let config = SpawnConfig::new("cmd.exe")
+            .args(["/d", "/c", "set /p hold="])
+            .stdin(Io::Pipe)
+            .stdout(Io::Null)
+            .stderr(Io::Null);
+        let mut child = spawn_in_isolation(config, &context).unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        drop(context);
+        let exited = if restricted {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if child.try_wait().unwrap().is_some() {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        } else {
+            child.try_wait().unwrap().is_some()
+        };
+        // Release the input barrier even on a failed assertion, so the test
+        // never leaves its own child waiting outside a job.
+        drop(child.take_stdin());
+        child.wait().unwrap();
+        assert_eq!(exited, restricted);
+    }
 }
 
 #[cfg(not(windows))]

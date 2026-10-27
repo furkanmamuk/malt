@@ -29,6 +29,15 @@ impl ProcessSupervisor {
 
     /// Spawn a new child process attached to a PTY.
     pub fn spawn(&mut self, req: SpawnRequest) -> Result<(), SupervisorError> {
+        // This entry point has no established session carrier or alternate
+        // HCS launcher. A requested tier is not proof of enforcement.
+        if req.isolation != malt_protocol::common::IsolationTier::Bare {
+            return Err(SupervisorError::SpawnFailed(
+                malt_platform::process::SpawnError::Isolation(
+                    "isolated Compat launch requires a session-owned launcher; refusing an uncontained process".to_string(),
+                ),
+            ));
+        }
         let size = WinSize {
             cols: req.cols,
             rows: req.rows,

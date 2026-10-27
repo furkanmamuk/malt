@@ -35,6 +35,10 @@ pub enum SpawnError {
     #[error("pgid {pgid} overflows i32 (valid range: 1..=2147483647)")]
     InvalidPgid { pgid: u32 },
 
+    /// The requested isolation could not be enforced; no child may run bare.
+    #[error("process isolation failed: {0}")]
+    Isolation(String),
+
     /// An OS-level I/O error occurred.
     #[error("spawn failed: {0}")]
     Io(#[from] std::io::Error),
@@ -658,6 +662,37 @@ pub fn spawn(config: SpawnConfig) -> Result<Child, SpawnError> {
             "unsupported platform",
         )))
     }
+}
+
+/// Spawn using the session's established enforcement, never falling back to
+/// ordinary spawning when a non-bare context has no usable launch mechanism.
+/// Container launchers are injected by the daemon rather than selected here.
+pub fn spawn_in_isolation(
+    config: SpawnConfig,
+    context: &crate::isolation::IsolationContext,
+) -> Result<Child, SpawnError> {
+    context
+        .ensure_launchable()
+        .map_err(|error| SpawnError::Isolation(error.to_string()))?;
+    if context.is_bare() {
+        return spawn(config);
+    }
+    #[cfg(windows)]
+    if let Some(job) = context
+        .job_object()
+        .map_err(|error| SpawnError::Isolation(error.to_string()))?
+    {
+        let result = windows::spawn_in_job(config, &job);
+        if let Err(SpawnError::Isolation(detail)) = &result {
+            context
+                .mark_lost(detail.clone())
+                .map_err(|error| SpawnError::Isolation(error.to_string()))?;
+        }
+        return result;
+    }
+    Err(SpawnError::Isolation(
+        "the session has no established platform launch mechanism".to_string(),
+    ))
 }
 
 /// Adopt an ordinary Win32 process handle plus HCS standard-stream handles

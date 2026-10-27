@@ -467,16 +467,32 @@ pub fn start_hcs_process(
     session_id: malt_protocol::common::SessionId,
     request: malt_protocol::elevate::HcsProcessRequest,
 ) -> io::Result<malt_protocol::elevate::HcsProcessLaunch> {
-    use malt_protocol::elevate::OutcomeKind;
-    use malt_protocol::vexil_runtime::{BitReader, Unpack};
-
     let response = send_hcs_container_operation(
         session_id,
         malt_protocol::elevate::ContainerOperation::StartProcess { request },
-    )?;
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::NotConnected, error))?;
+    decode_hcs_process_response(response)
+}
+
+#[cfg(windows)]
+fn decode_hcs_process_response(
+    response: malt_protocol::elevate::ElevateResponse,
+) -> io::Result<malt_protocol::elevate::HcsProcessLaunch> {
+    use malt_protocol::elevate::{OutcomeKind, ReasonCode};
+    use malt_protocol::vexil_runtime::{BitReader, Unpack};
     if response.kind != OutcomeKind::Performed {
         return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+            if response.kind == OutcomeKind::Indeterminate {
+                io::ErrorKind::ConnectionAborted
+            } else if matches!(
+                response.reason,
+                Some(ReasonCode::HelperUnavailable | ReasonCode::NotEntitled)
+            ) {
+                io::ErrorKind::NotConnected
+            } else {
+                io::ErrorKind::PermissionDenied
+            },
             response
                 .detail
                 .unwrap_or_else(|| "helper did not perform HCS process launch".to_string()),
@@ -547,6 +563,21 @@ mod tests {
         let response = refused(8, ReasonCode::HelperUnavailable, "not reachable");
         assert_eq!(response.kind, OutcomeKind::Refused);
         assert_eq!(response.reason, Some(ReasonCode::HelperUnavailable));
+    }
+
+    #[test]
+    fn hcs_launch_errors_distinguish_enforcement_loss_from_program_refusal() {
+        for reason in [ReasonCode::HelperUnavailable, ReasonCode::NotEntitled] {
+            let error = decode_hcs_process_response(refused(8, reason, "enforcement unavailable"))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::NotConnected);
+        }
+        let unknown = decode_hcs_process_response(indeterminate(9, "reply lost")).unwrap_err();
+        assert_eq!(unknown.kind(), io::ErrorKind::ConnectionAborted);
+        let program =
+            decode_hcs_process_response(refused(10, ReasonCode::OsError, "executable missing"))
+                .unwrap_err();
+        assert_eq!(program.kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]

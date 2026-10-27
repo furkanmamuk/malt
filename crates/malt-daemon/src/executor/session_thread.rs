@@ -35,6 +35,7 @@ use tracing::{info, warn};
 struct HcsProcessSpawner {
     session_id: SessionId,
     container_id: String,
+    context: malt_platform::isolation::IsolationContext,
 }
 
 #[cfg(windows)]
@@ -46,7 +47,22 @@ impl mash::env::ExternalProcessSpawner for HcsProcessSpawner {
         validate_hcs_stdio(&config)?;
         let request = hcs_process_request(&self.container_id, &config)?;
         let launch = crate::elevate_client::start_hcs_process(self.session_id.clone(), request)
-            .map_err(malt_platform::process::SpawnError::Io)?;
+            .map_err(|error| {
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::NotConnected
+                        | std::io::ErrorKind::InvalidData
+                ) {
+                    let detail = format!("HCS enforcement lost during process launch: {error}");
+                    if let Err(state_error) = self.context.mark_lost(detail) {
+                        return malt_platform::process::SpawnError::Isolation(
+                            state_error.to_string(),
+                        );
+                    }
+                }
+                malt_platform::process::SpawnError::Io(error)
+            })?;
         let mut child = malt_platform::process::child_from_hcs_process(
             launch.process_id,
             launch.process_handle,
@@ -376,6 +392,7 @@ fn apply_session_isolation(
             env.set_external_process_spawner(std::sync::Arc::new(HcsProcessSpawner {
                 session_id,
                 container_id,
+                context: context.clone(),
             }));
             env.set_isolation_context(context.clone());
             return Ok(AppliedSessionIsolation {

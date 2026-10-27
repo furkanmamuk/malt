@@ -1369,14 +1369,22 @@ impl Env {
     }
 
     /// Spawn an external command through the session-owned launcher when one
-    /// exists, otherwise through the platform's ordinary process entry point.
+    /// exists, otherwise through the platform's session-isolation entry point.
     pub fn spawn_external_process(
         &self,
         config: malt_platform::process::SpawnConfig,
     ) -> Result<malt_platform::process::Child, malt_platform::process::SpawnError> {
+        if let Some(context) = self.isolation_context() {
+            context.ensure_launchable().map_err(|error| {
+                malt_platform::process::SpawnError::Isolation(error.to_string())
+            })?;
+        }
         match &self.external_process_spawner {
             Some(spawner) => spawner.spawn(config),
-            None => malt_platform::process::spawn(config),
+            None => match self.isolation_context() {
+                Some(context) => malt_platform::process::spawn_in_isolation(config, context),
+                None => malt_platform::process::spawn(config),
+            },
         }
     }
 
@@ -1393,7 +1401,7 @@ impl Env {
         let context = self
             .isolation_context
             .take()
-            .unwrap_or_else(malt_platform::isolation::IsolationContext::bare);
+            .unwrap_or_else(malt_platform::isolation::IsolationContext::restricted);
         let result = context.establish_job_object(job);
         self.isolation_context = Some(context);
         result
@@ -1706,6 +1714,41 @@ pub struct EnvSnapshot {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lost_context_refuses_even_an_injected_launcher() {
+        use super::{Env, ExternalProcessSpawner};
+        use malt_platform::isolation::IsolationContext;
+        use malt_platform::process::{Child, SpawnConfig, SpawnError};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        #[derive(Debug)]
+        struct Probe(Arc<AtomicBool>);
+        impl ExternalProcessSpawner for Probe {
+            fn spawn(&self, _config: SpawnConfig) -> Result<Child, SpawnError> {
+                self.0.store(true, Ordering::SeqCst);
+                Err(SpawnError::Isolation("test launcher reached".to_string()))
+            }
+        }
+        let context = IsolationContext::contained();
+        context
+            .establish_container("owned-container".to_string())
+            .unwrap();
+        let mut env = Env::empty();
+        env.set_isolation_context(context.clone());
+        let invoked = Arc::new(AtomicBool::new(false));
+        env.set_external_process_spawner(Arc::new(Probe(invoked.clone())));
+        context
+            .mark_lost("helper disconnected".to_string())
+            .unwrap();
+        let error = env
+            .spawn_external_process(SpawnConfig::new("unreachable"))
+            .unwrap_err();
+        assert!(error.to_string().contains("helper disconnected"));
+        assert!(!invoked.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn environment_has_exactly_one_isolation_carrier_field() {
         let source = include_str!("env.rs");

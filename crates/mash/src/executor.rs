@@ -1447,7 +1447,6 @@ fn execute_simple_with_io(
         }
     };
     env.report_bg_pid(child.pid());
-    assign_child_to_session_job(env, &child);
 
     // Read captured output.
     let mut stdout_bytes = Vec::new();
@@ -1846,7 +1845,6 @@ fn execute_simple(
         }
     };
     env.report_bg_pid(child.pid());
-    assign_child_to_session_job(env, &child);
 
     // Read stdout and stderr incrementally (only populated when fd is Pipe,
     // not File), forwarding each chunk to the sink as it arrives so a
@@ -3782,7 +3780,6 @@ fn builtin_command(
         }
         match env.spawn_external_process(config) {
             Ok(mut child) => {
-                assign_child_to_session_job(env, &child);
                 let mut stdout_bytes = Vec::new();
                 let mut stderr_bytes = Vec::new();
                 if let Some(mut out) = child.take_stdout() {
@@ -5796,40 +5793,6 @@ fn apply_exec_redirects(env: &Env, io: &mut ResolvedIo) {
     }
 }
 
-/// Assign a freshly-spawned child to the session's Job Object, if the
-/// session has isolation active (see `Env::set_job_object`, wired by
-/// `malt-daemon`'s `session_thread::apply_session_isolation`). Best-effort:
-/// a failure here doesn't fail the command — the child still runs, just
-/// outside containment — but it's logged so the gap is visible rather than
-/// silent.
-#[cfg(windows)]
-fn assign_child_to_session_job(env: &Env, child: &malt_platform::process::Child) {
-    match env.isolation_context().map_or(
-        Ok(None),
-        malt_platform::isolation::IsolationContext::job_object,
-    ) {
-        Ok(Some(job)) => {
-            if let Err(error) =
-                malt_platform::isolation::job_objects::assign_process_to_job(&job, child.pid())
-            {
-                tracing::warn!(
-                    pid = child.pid(),
-                    %error,
-                    "failed to assign spawned process to session job object"
-                );
-            }
-        }
-        Ok(None) => {}
-        Err(error) => tracing::error!(
-            pid = child.pid(),
-            %error,
-            "unable to read session isolation state before assigning child"
-        ),
-    }
-}
-#[cfg(not(windows))]
-fn assign_child_to_session_job(_env: &Env, _child: &malt_platform::process::Child) {}
-
 fn add_runtime_spawn_env(config: &mut malt_platform::process::SpawnConfig, env: &Env) {
     if let Some(fd_aliases) = env.nonstdio_fd_alias_env_spec() {
         config
@@ -5975,7 +5938,6 @@ fn execute_shell_script_with_io(
         }
     };
     env.report_bg_pid(child.pid());
-    assign_child_to_session_job(env, &child);
 
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
@@ -6177,7 +6139,6 @@ fn execute_expanded_command(
         }
     };
     env.report_bg_pid(child.pid());
-    assign_child_to_session_job(env, &child);
 
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
@@ -6617,7 +6578,7 @@ mod tests {
     use super::find_in_path;
     use crate::env::{Env, Variable};
 
-    /// Proves `assign_child_to_session_job` actually contains a spawned
+    /// Proves the session launcher actually contains a spawned
     /// process, not just that it compiles. Spawns a real ~29s-long process
     /// (`ping -n 30`), assigns it to a session job object via the function
     /// under test, then terminates the job and confirms the process dies
@@ -6626,8 +6587,7 @@ mod tests {
     /// this test would fail, not silently pass.
     #[test]
     #[cfg(windows)]
-    fn assign_child_to_session_job_actually_terminates_process_via_job() {
-        use super::assign_child_to_session_job;
+    fn session_launcher_actually_terminates_process_via_job() {
         use malt_platform::isolation::job_objects;
         use malt_platform::process::{Io, SpawnConfig};
         use std::sync::Arc;
@@ -6637,8 +6597,14 @@ mod tests {
         config.args = vec!["-n".into(), "30".into(), "127.0.0.1".into()];
         config.stdout = Io::Pipe;
         config.stderr = Io::Pipe;
-        let mut child = malt_platform::process::spawn(config)
-            .expect("spawn ping (must be present on any Windows host)");
+        let job = job_objects::create_job_object("test-assign-child-job", 0, 0)
+            .expect("create job object");
+        let mut env = Env::empty();
+        env.set_job_object(Arc::new(job))
+            .expect("test context accepts its initial Job Object");
+        let mut child = env
+            .spawn_external_process(config)
+            .expect("spawn ping inside the session Job Object");
 
         // Sanity: it should still be running immediately after spawn — this
         // is what makes "dies within 2s after termination" meaningful rather
@@ -6650,15 +6616,6 @@ mod tests {
                 .is_none(),
             "ping should still be running right after spawn"
         );
-
-        let job = job_objects::create_job_object("test-assign-child-job", 0, 0)
-            .expect("create job object");
-
-        let mut env = Env::empty();
-        env.set_job_object(Arc::new(job))
-            .expect("test context accepts its initial Job Object");
-
-        assign_child_to_session_job(&env, &child);
 
         // Terminate via the job, not by killing the child directly — this is
         // the actual thing under test: was the child really in the job?
@@ -6687,7 +6644,7 @@ mod tests {
             exited,
             "process should have been terminated via the job object within 2s; \
              it was spawned to run for ~29s, so still-running here means \
-             assign_child_to_session_job did not actually put it in the job"
+             the session launcher did not actually put it in the job"
         );
     }
 

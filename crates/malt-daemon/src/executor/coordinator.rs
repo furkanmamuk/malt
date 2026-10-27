@@ -67,7 +67,11 @@ impl SessionHandle {
                 // Policy resolution supplies user-facing detail that is not
                 // part of the enforcement mechanism. Preserve it, but never
                 // preserve a stale effective tier or mechanism.
-                status.detail = self.isolation.detail.clone().or(status.detail);
+                if status.effective == self.isolation.effective
+                    && status.basis == self.isolation.basis
+                {
+                    status.detail = self.isolation.detail.clone().or(status.detail);
+                }
                 status
             }
             Err(error) => {
@@ -100,7 +104,9 @@ fn isolation_status(
             IsolationTier::Bare,
             IsolationBasis::None,
             None,
-            Some("no live isolation mechanism is established".to_string()),
+            Some(context.loss_reason()
+                .map_err(|error| DaemonError::IsolationUnavailable(error.to_string()))?
+                .unwrap_or_else(|| "no live isolation mechanism is established".to_string())),
         ),
         EstablishedKind::JobObject => (
             requested,
@@ -1025,7 +1031,9 @@ impl Coordinator {
                     SessionLifecycle::Active { cmd_tx, .. } => (
                         cmd_tx.clone(),
                         handle.name.clone(),
-                        handle.current_isolation().effective,
+                        // Persist the granted requirement, not a transient
+                        // loss report that would restore this session Bare.
+                        handle.isolation.effective,
                         handle.selected_image.clone(),
                         contained_teardown_for_handle(handle),
                     ),
@@ -1128,8 +1136,8 @@ impl Coordinator {
 
     /// Restore a Dormant Shell session to Active by re-spawning its mash thread.
     ///
-    /// For App or Compat pane types this returns a specific error — those restore
-    /// paths are not yet implemented.  On success the lifecycle transitions from
+    /// App and isolated Compat panes return a specific error; Bare Compat
+    /// processes can be relaunched. On success the lifecycle transitions from
     /// `Dormant` to `Active` and `persist_daemon_state` is called.
     fn restore_session(&mut self, id: SessionId) -> Result<(), DaemonError> {
         let (persisted, _session_name, session_isolation, selected_image) = {
@@ -1141,7 +1149,7 @@ impl Coordinator {
                 SessionLifecycle::Dormant { persisted } => (
                     persisted.clone(),
                     handle.name.clone(),
-                    handle.current_isolation().effective,
+                    handle.isolation.effective,
                     handle.selected_image.clone(),
                 ),
                 SessionLifecycle::Active { .. } => return Ok(()),
@@ -1185,6 +1193,13 @@ impl Coordinator {
                 return Err(DaemonError::AppRestoreNotSupported);
             }
             malt_protocol::persist::session::PersistedPaneType::Compat { program, args } => {
+                // Refuse before starting an executor or allocating helper
+                // resources. The PTY supervisor does not yet accept the
+                // session-owned launcher; never restore this process bare.
+                if session_isolation != IsolationTier::Bare {
+                    return Err(DaemonError::RestoreFailed(id.clone(),
+                        "isolated Compat restore has no session-owned launcher; session remains dormant".to_string()));
+                }
                 // Re-launch (not re-attach) -- matches the documented restore
                 // policy for every pane type: process memory is not
                 // captured, so a fresh CompatTranslator (blank grid) is
@@ -1226,13 +1241,6 @@ impl Coordinator {
                     return Err(DaemonError::RestoreFailed(id.clone(), e.to_string()));
                 }
 
-                // NOTE: the restored process is not assigned to the
-                // session's isolation Job Object -- ProcessSupervisor has
-                // no access to it (that lives inside the SessionExecutor
-                // thread's mash::Env, not the Coordinator). A
-                // Restricted/Capped/Contained session's restored compat
-                // process runs uncontained. Real, tracked gap, not a
-                // silent one -- see docs/BACKLOG.md.
                 if let Some((reader, _writer)) = self.supervisor.take_io(&pane_id) {
                     spawn_pty_reader(pane_id.clone(), reader, spawned.control_tx.clone());
                 }
@@ -1306,7 +1314,7 @@ impl Coordinator {
                     cmd_tx.clone(),
                     ingress.clone(),
                     handle.name.clone(),
-                    handle.current_isolation().effective,
+                    handle.isolation.effective,
                     handle.selected_image.clone(),
                     contained_teardown_for_handle(handle),
                 ),
@@ -1561,5 +1569,101 @@ fn spawn_pty_reader(
         });
     if let Err(e) = result {
         warn!(error = %e, "failed to spawn pty reader thread");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod isolation_loss_tests {
+    use super::*;
+    use crate::store::SessionStore;
+
+    #[test]
+    fn live_session_loss_changes_status_and_refuses_subsequent_external_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DebouncedStore::new(SessionStore::new(dir.path().to_path_buf())).unwrap();
+        let mut coordinator = Coordinator::new(PoolConfig::default(), store);
+        let id = coordinator
+            .create_session(None, IsolationTier::Restricted, None)
+            .unwrap();
+        assert_eq!(
+            coordinator.list_sessions()[0].isolation.basis,
+            IsolationBasis::Verified
+        );
+        let context = coordinator
+            .sessions
+            .get(&id.0)
+            .unwrap()
+            .isolation_context
+            .clone()
+            .unwrap();
+        context
+            .mark_lost("test: enforcement was lost".to_string())
+            .unwrap();
+        let report = coordinator.list_sessions().remove(0).isolation;
+        assert_eq!(report.requested, IsolationTier::Restricted);
+        assert_eq!(report.effective, IsolationTier::Bare);
+        assert_eq!(report.basis, IsolationBasis::None);
+        assert_eq!(report.mechanism, None);
+        assert_eq!(report.detail.as_deref(), Some("test: enforcement was lost"));
+        let output = coordinator
+            .submit_execution(id.clone(), "cmd.exe /d /c echo must-not-run".to_string())
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_ne!(output.exit_code, 0);
+        assert!(!output.output.contains("must-not-run"));
+        assert!(
+            output.stderr.contains("enforcement was lost"),
+            "{}",
+            output.stderr
+        );
+        assert_eq!(
+            coordinator.sessions.get(&id.0).unwrap().isolation.effective,
+            IsolationTier::Restricted,
+            "restoration must not persist a transient loss as a Bare grant"
+        );
+        coordinator.shutdown_graceful();
+        assert_eq!(
+            coordinator.store.load_session(&id).unwrap().isolation,
+            IsolationTier::Restricted
+        );
+        coordinator.destroy_session(id).unwrap();
+    }
+
+    #[test]
+    fn isolated_compat_restore_refuses_before_establishment_and_keeps_dormant_state() {
+        use malt_protocol::persist::session::PersistedPaneType;
+        let dir = tempfile::tempdir().unwrap();
+        let make_store =
+            || DebouncedStore::new(SessionStore::new(dir.path().to_path_buf())).unwrap();
+        let mut coordinator = Coordinator::new(PoolConfig::default(), make_store());
+        let id = coordinator
+            .create_session(None, IsolationTier::Bare, None)
+            .unwrap();
+        coordinator.shutdown_graceful();
+        let mut persisted = coordinator.store.load_session(&id).unwrap();
+        drop(coordinator);
+        persisted.isolation = IsolationTier::Contained;
+        persisted.panes.values_mut().next().unwrap().pane_type = PersistedPaneType::Compat {
+            program: "cmd.exe".to_string(),
+            args: vec!["/c".to_string(), "echo must-not-run".to_string()],
+        };
+        let store = make_store();
+        store.mark_dirty(id.clone(), persisted);
+        store.flush_all();
+        let mut restored = Coordinator::new(PoolConfig::default(), store);
+        let error = restored.restore_session(id.clone()).unwrap_err();
+        assert!(
+            error.to_string().contains("isolated Compat restore"),
+            "{error}"
+        );
+        assert_eq!(restored.list_sessions()[0].state, SessionState::Dormant);
+        assert!(restored
+            .sessions
+            .get(&id.0)
+            .unwrap()
+            .isolation_context
+            .is_none());
     }
 }

@@ -13,15 +13,19 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::Path;
 use std::process::Stdio;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+    DuplicateHandle, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
     INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+use windows_sys::Win32::System::Console::{
+    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
+use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, GetCurrentProcess, GetExitCodeProcess, WaitForSingleObject,
-    CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOW,
+    CreateProcessW, GetCurrentProcess, GetExitCodeProcess, ResumeThread, TerminateProcess,
+    WaitForSingleObject, CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW,
 };
 
 pub(super) fn parent_pid() -> Option<u32> {
@@ -31,9 +35,8 @@ pub(super) fn parent_pid() -> Option<u32> {
 const DUPLICATE_SAME_ACCESS: u32 = 0x0000_0002;
 
 enum StdioSpec {
-    Inherit,
     Null,
-    Child(HANDLE),
+    Child(OwnedHandle),
 }
 
 struct ParentPipes {
@@ -110,7 +113,7 @@ fn map_spawn_error(e: std::io::Error, program: &Path) -> SpawnError {
 
 pub(super) fn spawn(config: SpawnConfig) -> Result<Child, SpawnError> {
     if config.argv0.is_some() {
-        return spawn_with_create_process(config);
+        return spawn_with_create_process(config, None);
     }
 
     use std::os::windows::process::CommandExt;
@@ -208,7 +211,17 @@ fn checked_handle(value: u64, name: &str) -> Result<HANDLE, SpawnError> {
     Ok(value as HANDLE)
 }
 
-fn spawn_with_create_process(config: SpawnConfig) -> Result<Child, SpawnError> {
+pub(super) fn spawn_in_job(
+    config: SpawnConfig,
+    job: &crate::isolation::job_objects::JobObject,
+) -> Result<Child, SpawnError> {
+    spawn_with_create_process(config, Some(job))
+}
+
+fn spawn_with_create_process(
+    config: SpawnConfig,
+    job: Option<&crate::isolation::job_objects::JobObject>,
+) -> Result<Child, SpawnError> {
     let mut env_block = build_env_block(&config)?;
     let current_dir = config
         .cwd
@@ -226,6 +239,8 @@ fn spawn_with_create_process(config: SpawnConfig) -> Result<Child, SpawnError> {
     let stdout_spec = prepare_stdio(config.stdout, PipeDirection::Stdout, &mut parent_pipes)?;
     let stderr_spec = prepare_stdio(config.stderr, PipeDirection::Stderr, &mut parent_pipes)?;
 
+    // SAFETY: STARTUPINFOW is a plain Win32 record whose optional fields are
+    // null/zero-initializable; cb and standard handles are populated below.
     let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
     startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
     startup_info.dwFlags = STARTF_USESTDHANDLES;
@@ -233,9 +248,13 @@ fn spawn_with_create_process(config: SpawnConfig) -> Result<Child, SpawnError> {
     startup_info.hStdOutput = stdio_handle(&stdout_spec);
     startup_info.hStdError = stdio_handle(&stderr_spec);
 
+    // SAFETY: PROCESS_INFORMATION is an output-only Win32 handle/id record.
     let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
     let mut flags = CREATE_UNICODE_ENVIRONMENT;
+    if job.is_some() {
+        flags |= CREATE_SUSPENDED;
+    }
     if matches!(config.process_group, ProcessGroup::New) {
         flags |= CREATE_NEW_PROCESS_GROUP;
     }
@@ -245,7 +264,14 @@ fn spawn_with_create_process(config: SpawnConfig) -> Result<Child, SpawnError> {
     // STARTUPINFOW are properly initialized.
     let created = unsafe {
         CreateProcessW(
-            app_name.as_ptr(),
+            // Without an argv[0] override, let CreateProcessW resolve the
+            // executable token (including PATH/.exe lookup). With an override,
+            // MASH supplies the separately resolved application path.
+            if config.argv0.is_some() {
+                app_name.as_ptr()
+            } else {
+                std::ptr::null()
+            },
             command_line.as_mut_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -265,21 +291,70 @@ fn spawn_with_create_process(config: SpawnConfig) -> Result<Child, SpawnError> {
     close_child_handle(stderr_spec);
 
     if created == 0 {
+        // SAFETY: GetLastError reads thread-local state after the failed call.
         return Err(map_spawn_error(
             std::io::Error::from_raw_os_error(unsafe { GetLastError() } as i32),
             &config.program,
         ));
     }
 
-    // SAFETY: thread handle is owned by us after CreateProcessW success.
-    unsafe {
-        CloseHandle(process_info.hThread);
+    // SAFETY: successful CreateProcessW transfers these two distinct handles
+    // to us. RAII closes them on every success and error path below.
+    let process = unsafe { OwnedHandle::from_raw_handle(process_info.hProcess) };
+    // SAFETY: the primary thread handle is independently owned, as above.
+    let thread = unsafe { OwnedHandle::from_raw_handle(process_info.hThread) };
+    if let Some(job) = job {
+        // SAFETY: the job is borrowed and kept alive throughout assignment;
+        // the owned process has not executed any user instructions yet.
+        let assigned =
+            unsafe { AssignProcessToJobObject(job.handle() as HANDLE, process_info.hProcess) };
+        let failure = if assigned == 0 {
+            Some(format!(
+                "Job Object assignment: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            // SAFETY: this is the primary thread we created suspended, now
+            // assigned to the session job. Only this call permits execution.
+            let resumed = unsafe { ResumeThread(process_info.hThread) };
+            (resumed == u32::MAX).then(|| {
+                format!(
+                    "resuming isolated child: {}",
+                    std::io::Error::last_os_error()
+                )
+            })
+        };
+        if let Some(mut detail) = failure {
+            // SAFETY: the child is still suspended and this owned handle has
+            // PROCESS_TERMINATE rights from CreateProcessW. Never resume it
+            // after an enforcement failure.
+            if unsafe { TerminateProcess(process_info.hProcess, 1) } == 0 {
+                detail.push_str(&format!(
+                    "; terminating suspended child: {}",
+                    std::io::Error::last_os_error()
+                ));
+            } else {
+                // SAFETY: successful termination was requested above and the
+                // process handle remains owned until the wait finishes.
+                if unsafe { WaitForSingleObject(process_info.hProcess, INFINITE) } != WAIT_OBJECT_0
+                {
+                    detail.push_str(&format!(
+                        "; waiting for terminated child: {}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+            }
+            return Err(SpawnError::Isolation(detail));
+        }
     }
+    drop(thread);
+
+    use std::os::windows::io::IntoRawHandle;
 
     Ok(Child {
         pid: process_info.dwProcessId,
         inner: ChildInner::Native {
-            handle: process_info.hProcess,
+            handle: process.into_raw_handle(),
         },
         stdin: parent_pipes.stdin.map(super::ChildStdinHandle::Sync),
         stdout: parent_pipes.stdout.map(super::ChildStdoutHandle::Sync),
@@ -301,15 +376,34 @@ fn prepare_stdio(
     parent_pipes: &mut ParentPipes,
 ) -> Result<StdioSpec, SpawnError> {
     match io {
-        Io::Inherit => Ok(StdioSpec::Inherit),
+        Io::Inherit => {
+            let which = match direction {
+                PipeDirection::Stdin => STD_INPUT_HANDLE,
+                PipeDirection::Stdout => STD_OUTPUT_HANDLE,
+                PipeDirection::Stderr => STD_ERROR_HANDLE,
+            };
+            // SAFETY: reads the current process's standard handle; a missing
+            // console/service stream remains null rather than being owned.
+            let handle = unsafe { GetStdHandle(which) };
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                Ok(StdioSpec::Null)
+            } else {
+                child_stdio(dup_handle(handle, true)?)
+            }
+        }
         Io::Null => Ok(StdioSpec::Null),
-        Io::File(file) => Ok(StdioSpec::Child(dup_handle(
-            file.as_raw_handle() as HANDLE,
-            true,
-        )?)),
-        Io::Handle(handle) => Ok(StdioSpec::Child(dup_handle(handle, true)?)),
+        Io::File(file) => child_stdio(dup_handle(file.as_raw_handle() as HANDLE, true)?),
+        Io::Handle(handle) => child_stdio(dup_handle(handle, true)?),
         Io::Pipe => create_pipe_stdio(direction, parent_pipes),
     }
+}
+
+fn child_stdio(handle: HANDLE) -> Result<StdioSpec, SpawnError> {
+    // SAFETY: callers transfer a freshly created or duplicated handle. Keeping
+    // it owned also closes earlier streams if preparing a later stream fails.
+    Ok(StdioSpec::Child(unsafe {
+        OwnedHandle::from_raw_handle(handle)
+    }))
 }
 
 fn create_pipe_stdio(
@@ -330,24 +424,27 @@ fn create_pipe_stdio(
         return Err(SpawnError::Io(std::io::Error::last_os_error()));
     }
 
+    // SAFETY: CreatePipe transferred two distinct owned handles. Own both
+    // before SetHandleInformation, which can fail on either direction.
+    let read = unsafe { OwnedHandle::from_raw_handle(read_handle) };
+    // SAFETY: the write endpoint is independently owned, as above.
+    let write = unsafe { OwnedHandle::from_raw_handle(write_handle) };
+
     match direction {
         PipeDirection::Stdin => {
             set_non_inheritable(write_handle)?;
-            let parent = child_stdin_from_handle(write_handle);
-            parent_pipes.stdin = Some(parent);
-            Ok(StdioSpec::Child(read_handle))
+            parent_pipes.stdin = Some(write.into());
+            Ok(StdioSpec::Child(read))
         }
         PipeDirection::Stdout => {
             set_non_inheritable(read_handle)?;
-            let parent = child_stdout_from_handle(read_handle);
-            parent_pipes.stdout = Some(parent);
-            Ok(StdioSpec::Child(write_handle))
+            parent_pipes.stdout = Some(read.into());
+            Ok(StdioSpec::Child(write))
         }
         PipeDirection::Stderr => {
             set_non_inheritable(read_handle)?;
-            let parent = child_stderr_from_handle(read_handle);
-            parent_pipes.stderr = Some(parent);
-            Ok(StdioSpec::Child(write_handle))
+            parent_pipes.stderr = Some(read.into());
+            Ok(StdioSpec::Child(write))
         }
     }
 }
@@ -361,39 +458,15 @@ fn set_non_inheritable(handle: HANDLE) -> Result<(), SpawnError> {
     Ok(())
 }
 
-fn child_stdin_from_handle(handle: HANDLE) -> std::fs::File {
-    // SAFETY: handle is a valid owned write-end of a pipe.
-    let owned = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
-    owned.into()
-}
-
-fn child_stdout_from_handle(handle: HANDLE) -> std::fs::File {
-    // SAFETY: handle is a valid owned read-end of a pipe.
-    let owned = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
-    owned.into()
-}
-
-fn child_stderr_from_handle(handle: HANDLE) -> std::fs::File {
-    // SAFETY: handle is a valid owned read-end of a pipe.
-    let owned = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
-    owned.into()
-}
-
 fn stdio_handle(spec: &StdioSpec) -> HANDLE {
     match spec {
-        StdioSpec::Inherit => INVALID_HANDLE_VALUE,
         StdioSpec::Null => std::ptr::null_mut(),
-        StdioSpec::Child(handle) => *handle,
+        StdioSpec::Child(handle) => handle.as_raw_handle(),
     }
 }
 
 fn close_child_handle(spec: StdioSpec) {
-    if let StdioSpec::Child(handle) = spec {
-        // SAFETY: handle is owned by this process after duplication/CreatePipe.
-        unsafe {
-            CloseHandle(handle);
-        }
-    }
+    drop(spec);
 }
 
 fn os_to_wide_null(value: &OsStr) -> Vec<u16> {
@@ -458,6 +531,9 @@ fn build_env_block(config: &SpawnConfig) -> Result<Vec<u16>, SpawnError> {
         entry.push("=");
         entry.push(value);
         block.extend(entry.encode_wide());
+        block.push(0);
+    }
+    if block.is_empty() {
         block.push(0);
     }
     block.push(0);

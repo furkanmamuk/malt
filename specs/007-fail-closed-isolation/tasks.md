@@ -30,8 +30,9 @@ Multi-crate Rust workspace. Paths are repo-relative from the worktree root.
 >    call *does* succeed and nothing checks that anything is constrained by
 >    it. Every tier claim needs a test that observes the constraint from
 >    outside.
-> 3. **Smoosh is not a gate** for this feature; `mash` is untouched. Said
->    explicitly so its absence is not read as an oversight.
+> 3. **Smoosh is a gate for the 2026-10-27 continuation.** The original
+>    implementation left `mash` untouched; closing the post-spawn assignment
+>    gap now changes its common external-process launcher.
 
 ---
 
@@ -110,7 +111,7 @@ platform tasks has been fixed.
 |---|---|
 | **T032** (Linux) | **UNBLOCKED.** It depended on the Unix PTY, which was inverted — `open_pty` dropped the slave and handed the child dups of the master, so no process spawned through `spawn_with_pty` could deliver output. Fixed 2026-07-28, `docs/briefs/007`. Linux compat panes now work, and the full Linux suite is green (116 suites) |
 | **T033** (macOS) | **OUT OF SCOPE.** ADR-0006 declares macOS unsupported: nobody on this project has a machine to test on, and it is removed from CI. The `sandbox.rs` code stays in the tree. **Do not pick this up** while that ADR stands |
-| **T028** (HCS contained spawn) | **Still blocked**, and the reason is now precise rather than vague: `HCS_E_ACCESS_DENIED`. Needs a privileged helper *and* a base image layer — specs 008 and 009 respectively. Not a hardware wait; scoped work that belongs to those specs |
+| **T028** (HCS contained spawn) | **Delivered by Specs 008/009; reconciled 2026-10-27.** See the checked task and its dated live evidence below. Adjacent-tier proof and loss handling remain separate |
 | **T027, T037, T042, T043** | Unchanged and available |
 
 **Verification environment has also changed**, and it matters for T032:
@@ -147,6 +148,7 @@ and still be wired backwards.
 - [X] T025 [US3] Research R9 records AppContainer as out of scope, never a silent fallback.
 - [X] T026 [US3] Windows establishment now calls real `QueryInformationJobObject` after creation; only a successful create-and-enumerate result is reported as `basis: verified`.
 - [ ] T027 [US3] Test in `crates/malt-platform/tests/isolation_reality.rs` that for each adjacent tier pair, one constraint binds at the stronger and not the weaker (SC-004), by running real work — not by comparing the limit values the code passed in.
+  - 2026-10-27 continuation: Bare/Restricted teardown comparison and Restricted/Capped allocation comparison exercise the actual platform launcher. Capped/Contained still needs a fresh real-image comparison; this parent task remains open.
 - [X] T028 [P] [US3] **Prerequisite delivered by Specs 008/009; reconciled 2026-10-27.** The original null-`HCS_OPERATION` crash was fixed in [brief 006](../../docs/briefs/006-hcs-backend-access-violation.md). The subsequent privilege/base-layer blocker was resolved by the enrolled LocalSystem helper and helper-owned Windows image layers. [Live Spec 009 evidence](../../docs/findings/2026-07-27-windows-image-provisioning.md) records required contained session creation, real `cmd /c ver` execution, and compute/workspace/image teardown. This closes the Windows helper/image prerequisite, not the adjacent-tier comparison (T027), containment-loss reporting (T037), or Linux wiring (T032).
 - [ ] T032 [US4] Wire the Linux path in `crates/malt-daemon/src/executor/session_thread.rs` using the existing `namespaces`/`cgroups`/`seccomp`/`rlimit` modules — subject to what T004 found about whether they work. Do not write new backends before confirming the existing ones are absent or broken.
 - [ ] T033 [US4] **Out of scope while ADR-0006 stands: macOS is unsupported.** Original task retained for traceability: wire the macOS path using the existing `crates/malt-platform/src/isolation/sandbox.rs`. Do not pick this up without the real-host support decision required by [ADR-0006](../../docs/adr/ADR-0006-macos-is-unsupported.md).
@@ -183,12 +185,13 @@ and still be wired backwards.
 > returning true on Job Objects alone.
 
 - [ ] T037 Surface containment lost after creation (FR-017) in `crates/malt-daemon/src/executor/session_thread.rs`, updating the stored status rather than leaving a session reporting a level it no longer has. Note the detection point is unspecified by the spec -- decide whether it is checked on query, on command execution, or not at all this cycle, and record which.
+  - 2026-10-27 continuation: detection is on external-process launch, not idle polling. Native assignment/resume failure and unavailable/indeterminate HCS launch invalidate the shared carrier; subsequent launches refuse, status loses its verified mechanism, and cleanup identity is retained. Real native assignment-denial and coordinator loss tests are added. Fresh live helper-loss proof remains outstanding, so this task is not yet checked.
 - [X] T038 Closed `specs/001-cli-isolation-flag/spec.md` with the existing required-refusal, visible-preferred-downgrade, and verified-capped-status test evidence.
 - [X] T039 [P] Closed audit A-02 in `docs/BACKLOG.md` with named evidence and restated the still-unavailable AppContainer, HCS, Linux, and macOS spawn backends.
 - [X] T040 [P] Updated `AGENTS.md` command reference with fail-closed policy semantics and `malt isolation capabilities`.
 - [X] T041 Recorded the breaking `SessionInfo.isolation` shape and Required-by-default behavior in `docs/RELEASE_NOTES.md`, naming `preferred` and `disabled` as explicit alternatives.
 - [ ] T042 Run the full quickstart manually against a live daemon — all eight scenarios — and record the outcome in a dated `docs/findings/` entry, **including what it does not establish**.
-- [ ] T043 Final verification: `cargo test --workspace`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`. Smoosh not required (`mash` untouched). Commit. **Merge to main.**
+- [ ] T043 Final verification: `cargo build --workspace`, `cargo test --workspace`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and native Smoosh (the continuation changes `mash`). Run the WSL mirror for platform-path changes. Commit. **Merge to main.**
 
 ---
 

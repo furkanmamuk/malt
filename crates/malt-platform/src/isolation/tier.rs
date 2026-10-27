@@ -280,6 +280,11 @@ pub enum Established {
     #[cfg(windows)]
     JobObject(std::sync::Arc<super::job_objects::JobObject>),
     Container(String),
+    /// Retain ownership for teardown, but never use a lost resource to launch.
+    Lost {
+        previous: Box<Established>,
+        detail: String,
+    },
 }
 
 /// The kind of live enforcement attached to an isolation context.
@@ -360,8 +365,7 @@ impl IsolationContext {
         &self,
         job: std::sync::Arc<super::job_objects::JobObject>,
     ) -> Result<(), IsolationError> {
-        self.ensure_unestablished("Job Object")?;
-        *self.lock_established()? = Established::JobObject(job);
+        self.establish(Established::JobObject(job), "Job Object")?;
         Ok(())
     }
 
@@ -378,14 +382,17 @@ impl IsolationContext {
     /// Record the HCS compute-system identity after a helper reports it
     /// performed. This is deliberately separate from requesting containment.
     pub fn establish_container(&self, id: String) -> Result<(), IsolationError> {
-        self.ensure_unestablished("HCS container")?;
-        *self.lock_established()? = Established::Container(id);
+        self.establish(Established::Container(id), "HCS container")?;
         Ok(())
     }
 
     pub fn container_id(&self) -> Result<Option<String>, IsolationError> {
         match &*self.lock_established()? {
             Established::Container(id) => Ok(Some(id.clone())),
+            Established::Lost { previous, .. } => match previous.as_ref() {
+                Established::Container(id) => Ok(Some(id.clone())),
+                _ => Ok(None),
+            },
             _ => Ok(None),
         }
     }
@@ -398,18 +405,51 @@ impl IsolationContext {
             #[cfg(windows)]
             Established::JobObject(_) => EstablishedKind::JobObject,
             Established::Container(_) => EstablishedKind::Container,
+            Established::Lost { .. } => EstablishedKind::Nothing,
         })
     }
 
     /// Remove a lost enforcement mechanism without changing the requested
     /// tier. This records degraded reality but never permits a later upgrade.
     pub fn clear_established(&self) -> Result<(), IsolationError> {
-        *self.lock_established()? = Established::Nothing;
+        self.mark_lost("session isolation enforcement was lost".to_string())
+    }
+
+    /// Invalidate every clone without discarding resources needed for cleanup.
+    /// Loss is terminal for this session; recovery requires a new session.
+    pub fn mark_lost(&self, detail: String) -> Result<(), IsolationError> {
+        let mut state = self.lock_established()?;
+        if !matches!(*state, Established::Lost { .. }) {
+            let previous = Box::new(std::mem::replace(&mut *state, Established::Nothing));
+            *state = Established::Lost { previous, detail };
+        }
         Ok(())
     }
 
-    fn ensure_unestablished(&self, attempted: &str) -> Result<(), IsolationError> {
-        if matches!(*self.lock_established()?, Established::Nothing) {
+    pub fn loss_reason(&self) -> Result<Option<String>, IsolationError> {
+        Ok(match &*self.lock_established()? {
+            Established::Lost { detail, .. } => Some(detail.clone()),
+            _ => None,
+        })
+    }
+
+    /// Check before either the native or injected session launcher is invoked.
+    pub fn ensure_launchable(&self) -> Result<(), IsolationError> {
+        match &*self.lock_established()? {
+            Established::Lost { detail, .. } => {
+                Err(IsolationError::EstablishmentLocked(detail.clone()))
+            }
+            Established::Nothing if !self.is_bare() => Err(IsolationError::EstablishmentLocked(
+                "non-bare session has no established enforcement".to_string(),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn establish(&self, resource: Established, attempted: &str) -> Result<(), IsolationError> {
+        let mut state = self.lock_established()?;
+        if matches!(*state, Established::Nothing) {
+            *state = resource;
             Ok(())
         } else {
             Err(IsolationError::EstablishmentLocked(format!(
@@ -636,6 +676,34 @@ mod tests {
         assert_eq!(
             status_view.container_id().expect("read container id"),
             Some("shared-container".to_string())
+        );
+    }
+
+    #[test]
+    fn loss_is_shared_terminal_and_retains_cleanup_identity() {
+        let context = IsolationContext::contained();
+        let peer = context.clone();
+        context
+            .establish_container("cleanup-target".to_string())
+            .unwrap();
+        context
+            .mark_lost("helper disconnected".to_string())
+            .unwrap();
+        assert_eq!(peer.established_kind().unwrap(), EstablishedKind::Nothing);
+        assert_eq!(
+            peer.loss_reason().unwrap().as_deref(),
+            Some("helper disconnected")
+        );
+        assert_eq!(
+            peer.container_id().unwrap().as_deref(),
+            Some("cleanup-target")
+        );
+        assert!(peer.ensure_launchable().is_err());
+        assert!(peer.establish_container("replacement".to_string()).is_err());
+        peer.clear_established().unwrap();
+        assert_eq!(
+            context.loss_reason().unwrap().as_deref(),
+            Some("helper disconnected")
         );
     }
 }

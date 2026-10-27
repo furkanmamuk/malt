@@ -24,6 +24,27 @@ fn echo_request(pane_id: u32) -> SpawnRequest {
     }
 }
 
+#[test]
+fn non_bare_spawn_without_a_session_launcher_is_refused_before_execution() {
+    let mut supervisor = ProcessSupervisor::new();
+    for tier in [
+        IsolationTier::Restricted,
+        IsolationTier::Capped,
+        IsolationTier::Contained,
+    ] {
+        let mut request = echo_request(91);
+        request.isolation = tier;
+        // A nonexistent executable distinguishes admission refusal from an
+        // ordinary launch error: no platform process creation should occur.
+        request.program = PathBuf::from("malt-must-not-launch-this-program");
+        let error = supervisor.spawn(request).unwrap_err();
+        assert!(
+            error.to_string().contains("isolated Compat launch"),
+            "{error}"
+        );
+    }
+}
+
 fn sleep_request(pane_id: u32) -> SpawnRequest {
     SpawnRequest {
         #[cfg(unix)]
